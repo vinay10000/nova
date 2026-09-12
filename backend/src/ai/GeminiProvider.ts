@@ -12,19 +12,6 @@ export const MODELS = {
   live: 'gemini-3.1-flash-live-preview',
 } as const;
 
-// Model returns role 'model'; the Interactions API input expects 'user'/'model'.
-type Step = { type: string; name?: string; arguments?: unknown; call_id?: string; content?: unknown };
-
-/** Map Gemini steps to our normalized stream chunks. */
-function* stepToChunks(step: Step): Generator<StreamChunk> {
-  if (step.type === 'text' && typeof step.content === 'string') {
-    yield { type: 'token', text: step.content };
-  }
-  if (step.type === 'function_call' && step.name) {
-    yield { type: 'tool_call', toolId: step.name, callId: step.call_id, args: step.arguments };
-  }
-}
-
 // §2-§3 Gemini via backend only. Function calling is the primary tool bridge (§15).
 export class GeminiProvider implements AIProvider {
   private client: GoogleGenAI;
@@ -34,70 +21,94 @@ export class GeminiProvider implements AIProvider {
     this.client = new GoogleGenAI({ apiKey });
   }
 
+  /**
+   * Verified Interactions API shape: `create()` takes `input` always; turn 1 passes the
+   * text, follow-ups pass `function_result` steps plus `previous_interaction_id`.
+   * Streaming emits `step.delta` events carrying `TextDelta { type:'text', text }`.
+   */
   async *streamChat(
     messages: ChatMessage[],
-    opts?: { model?: string; tools?: ToolDef[]; previousInteractionId?: string; signal?: AbortSignal },
+    opts?: { model?: string; tools?: ToolDef[]; previousInteractionId?: string; functionResults?: FunctionResultInput[] },
   ): AsyncGenerator<StreamChunk> {
+    const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+    const turns = messages.filter((m) => m.role !== 'system');
+
     const stream = await this.client.interactions.create({
       model: opts?.model ?? MODELS.chat,
-      // Verified: turn 1 sends the new user text; follow-ups pass previous_interaction_id
-      // plus a function_result input instead of replaying history.
-      ...(opts?.previousInteractionId
-        ? { previous_interaction_id: opts.previousInteractionId }
-        : { input: toInput(messages) }),
+      input: opts?.functionResults?.length
+        ? opts.functionResults
+        : transcript(turns),
+      ...(opts?.previousInteractionId ? { previous_interaction_id: opts.previousInteractionId } : {}),
+      ...(system ? { system_instruction: system } : {}),
       ...(opts?.tools?.length ? { tools: opts.tools.map(toToolDef) } : {}),
+      store: true, // required for previous_interaction_id chaining
       stream: true,
     });
 
-    let interactionId: string | undefined;
-    for await (const event of stream as AsyncIterable<{ event_type?: string; interaction_id?: string; step?: Step }>) {
-      interactionId = event.interaction_id ?? interactionId;
-      if (event.step) yield* stepToChunks(event.step);
+    for await (const event of stream) {
+      if (event.event_type === 'step.delta' && event.delta?.type === 'text') {
+        yield { type: 'token', text: event.delta.text };
+      }
+      // step.start carries a complete function_call step (name/arguments/call_id).
+      if (event.event_type === 'step.start' && event.step?.type === 'function_call' && event.step.name) {
+        // Verified: FunctionCallStep exposes `id` (used as call_id on the matching function_result).
+        yield { type: 'tool_call', toolId: event.step.name, callId: event.step.id, args: event.step.arguments };
+      }
+      if (event.event_type === 'interaction.completed') {
+        yield { type: 'done', interactionId: event.interaction?.id };
+      }
     }
-    yield { type: 'done', interactionId };
   }
 
   async generateAgentConfig(naturalLanguage: string): Promise<unknown> {
     // §12-§14: goal/tools/permissions/schedule, plus questions[] when input is incomplete.
     const res = await this.client.interactions.create({
       model: MODELS.reasoning,
-      input: [
-        {
-          type: 'text',
-          text:
-            'Convert the request into an agent configuration matching shared/agent-config.schema.json. ' +
-            'If goal, tools, schedule, or output is unclear, return {"questions":[...]} instead. ' +
-            `Request: ${naturalLanguage}`,
-        },
-      ],
-      response_format: { type: 'json_object' },
+      input:
+        'Convert the request into an agent configuration matching shared/agent-config.schema.json. ' +
+        'If goal, tools, schedule, or output is unclear, return {"questions":[...]} instead. ' +
+        `Request: ${naturalLanguage}`,
+      response_format: { type: 'text', mime_type: 'application/json' },
     });
-    const text = (res as { output_text?: string }).output_text ?? '';
-    try {
-      return JSON.parse(text);
-    } catch {
-      return { questions: ['Could not parse a configuration. Rephrase the goal?'], raw: text };
-    }
+    return parseJson(outputText(res), { error: 'unparseable' });
   }
 
   async titleFor(firstUserMessage: string): Promise<string> {
     // §8 auto-title. Cheap model, short cap.
     const res = await this.client.interactions.create({
       model: MODELS.cheap,
-      input: [{ type: 'text', text: `Title this chat in 6 words or fewer, no quotes: ${firstUserMessage}` }],
+      input: `Title this chat in 6 words or fewer, no quotes, no trailing period: ${firstUserMessage}`,
     });
-    return ((res as { output_text?: string }).output_text ?? 'New chat').trim().slice(0, 80);
+    return (outputText(res).trim() || 'New chat').replace(/^["']|["']$/g, '').slice(0, 80);
   }
 }
 
-function toInput(messages: ChatMessage[]) {
-  return messages.map((m) => ({
-    type: 'text' as const,
-    text: m.role === 'system' ? `[system] ${m.content}` : m.content,
-    ...(m.role === 'model' ? { role: 'model' } : {}),
-  }));
+export interface FunctionResultInput {
+  type: 'function_result';
+  name: string;
+  call_id: string;
+  result: string;
+  is_error?: boolean;
+}
+
+/** Turn 1 input: a plain string transcript. Simplest form the API accepts. */
+function transcript(turns: ChatMessage[]): string {
+  if (turns.length === 1) return turns[0]!.content;
+  return turns.map((m) => `${m.role === 'model' ? 'Assistant' : 'User'}: ${m.content}`).join('\n\n');
 }
 
 function toToolDef(t: ToolDef) {
   return { type: 'function' as const, name: t.name, description: t.description, parameters: t.parameters };
+}
+
+function outputText(res: unknown): string {
+  return (res as { output_text?: string }).output_text ?? '';
+}
+
+function parseJson(text: string, fallback: unknown): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { ...(fallback as object), raw: text };
+  }
 }

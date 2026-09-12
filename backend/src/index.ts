@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { z } from 'zod';
 import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
 import { GeminiProvider, MODELS } from './ai/GeminiProvider.js';
 import { createChatService } from './services/chatService.js';
 import { prismaChatStore } from './services/prismaChatStore.js';
@@ -10,7 +11,8 @@ import { hashPassword, issueToken, requireUser, verifyPassword } from './auth.js
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
-const db = new PrismaClient();
+// Prisma 7 requires a driver adapter; pg connects directly to Postgres.
+const db = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL ?? '' }) });
 const ai = new GeminiProvider();
 const chat = createChatService(ai, prismaChatStore(db));
 

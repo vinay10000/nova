@@ -3,12 +3,27 @@ package com.nova.app
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.flow.*
+import com.nova.app.data.ChatStreamClient
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 
 // §8 entities (backend-owned; Room cache mirrors these).
@@ -17,49 +32,181 @@ data class Message(val id: String = "", val role: String, val content: String)
 @kotlinx.serialization.Serializable
 data class Agent(val id: String = "", val name: String, val goal: String, val status: String = "draft")
 
-// §6 chat VM: streaming, stop, regenerate, retry. Voice/files attach in Phase 2.
-class ChatViewModel : ViewModel() {
+/**
+ * §6 chat VM: streams tokens progressively, supports stop/regenerate/retry/edit (§6).
+ * No fake responses — every token comes from the backend (§61).
+ */
+class ChatViewModel(
+  private val client: ChatStreamClient = ChatStreamClient(),
+  private var conversationId: String? = null,
+) : ViewModel() {
   private val _messages = MutableStateFlow<List<Message>>(emptyList())
-  val messages: StateFlow<List<Message>> = _messages
+  val messages: StateFlow<List<Message>> = _messages.asStateFlow()
   private val _streaming = MutableStateFlow(false)
-  val streaming: StateFlow<Boolean> = _streaming
+  val streaming: StateFlow<Boolean> = _streaming.asStateFlow()
+  private val _error = MutableStateFlow<String?>(null)
+  val error: StateFlow<String?> = _error.asStateFlow()
+
+  private var job: Job? = null
+  private var lastUserText: String? = null
 
   fun send(text: String) {
-    viewModelScope.launch {
-      _messages.value += Message(role = "user", content = text)
-      _streaming.value = true
-      // TODO Phase 1: Retrofit SSE to POST /v1/chat/stream, append chunks progressively (§6).
-      _messages.value += Message(role = "assistant", content = "TODO: stream from backend Gemini.")
+    if (text.isBlank() || _streaming.value) return
+    val cid = conversationId ?: return _error.set("No conversation. Create one first.")
+    lastUserText = text
+
+    _messages.value += Message(role = "user", content = text)
+    // Placeholder assistant row that tokens append into — gives live progress (§6).
+    _messages.value += Message(role = "assistant", content = "")
+    _error.value = null
+    _streaming.value = true
+
+    job = viewModelScope.launch {
+      client.stream(cid, text)
+        .catch { _error.value = it.message ?: "stream_failed" }
+        .collect { chunk ->
+          when (chunk.type) {
+            "token" -> appendToLast(chunk.text.orEmpty())
+            "error" -> _error.value = chunk.code ?: "stream_error"
+            "done" -> _streaming.value = false
+          }
+        }
       _streaming.value = false
     }
   }
-  fun stop() { _streaming.value = false /* TODO cancel SSE call */ }
-  fun newChat() { _messages.value = emptyList() }
+
+  private fun appendToLast(text: String) {
+    val list = _messages.value.toMutableList()
+    val last = list.lastOrNull() ?: return
+    list[list.lastIndex] = last.copy(content = last.content + text)
+    _messages.value = list
+  }
+
+  /** §6 stop generation — cancels the SSE call, keeping partial output. */
+  fun stop() {
+    job?.cancel()
+    job = null
+    _streaming.value = false
+  }
+
+  /** §6 regenerate — drop the assistant reply and resend the same prompt. */
+  fun regenerate() {
+    val prompt = lastUserText ?: return
+    stop()
+    val list = _messages.value.toMutableList()
+    if (list.lastOrNull()?.role == "assistant") list.removeAt(list.lastIndex)
+    if (list.lastOrNull()?.role == "user") list.removeAt(list.lastIndex)
+    _messages.value = list
+    send(prompt)
+  }
+
+  /** §6 edit user message — rewinds to that message and resends the edited text. */
+  fun editAndResend(index: Int, newText: String) {
+    stop()
+    _messages.value = _messages.value.take(index)
+    send(newText)
+  }
+
+  fun retry() = regenerate()
+
+  fun newChat(id: String? = null) {
+    stop()
+    conversationId = id
+    lastUserText = null
+    _error.value = null
+    _messages.value = emptyList()
+  }
+
+  fun openConversation(id: String, history: List<Message>) {
+    stop()
+    conversationId = id
+    _messages.value = history
+  }
+
+  fun clearError() { _error.value = null }
 }
 
 @Composable
 fun ChatScreen(vm: ChatViewModel = viewModel()) {
   val messages by vm.messages.collectAsState()
   val streaming by vm.streaming.collectAsState()
+  val error by vm.error.collectAsState()
+  val clipboard = LocalClipboardManager.current
   var input by remember { mutableStateOf("") }
+  val listState = rememberLazyListState()
+
+  // Follow the newest token as it streams in.
+  LaunchedEffect(messages.size, messages.lastOrNull()?.content?.length) {
+    if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+  }
+
   Column(Modifier.fillMaxSize().imePadding()) {
-    // New Chat action (§5)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
       TextButton(onClick = { vm.newChat() }) { Text("New Chat") }
     }
-    LazyColumn(Modifier.weight(1f)) {
-      items(messages) { m ->
-        ListItem(headlineContent = { Text(m.content) }, supportingContent = { Text(m.role) },
-          trailingContent = { TextButton(onClick = {}) { Text("Copy") } }) // copy/regenerate/retry/edit/share per §6
+
+    LazyColumn(Modifier.weight(1f), state = listState) {
+      if (messages.isEmpty()) {
+        item {
+          Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Start chatting — no agent knowledge needed.", style = MaterialTheme.typography.bodyLarge)
+          }
+        }
       }
-      if (messages.isEmpty()) item { Text("Start chatting — no agent knowledge needed.", modifier = Modifier.padding(16.dp)) }
+      items(messages.size) { i ->
+        val m = messages[i]
+        ListItem(
+          headlineContent = { Text(m.content.ifEmpty { if (streaming) "…" else "" }) },
+          supportingContent = { Text(if (m.role == "user") "You" else "Nova") },
+          trailingContent = {
+            if (m.role == "assistant" && m.content.isNotEmpty()) {
+              Row {
+                IconButton(onClick = { clipboard.setText(AnnotatedString(m.content)) }) {
+                  Icon(Icons.Default.ContentCopy, contentDescription = "Copy message")
+                }
+                IconButton(onClick = { vm.regenerate() }) {
+                  Icon(Icons.Default.Refresh, contentDescription = "Regenerate response")
+                }
+              }
+            }
+          },
+        )
+      }
+      // §6 retry affordance on failure.
+      error?.let { code ->
+        item {
+          ListItem(
+            headlineContent = { Text("Something went wrong: $code") },
+            trailingContent = {
+              Row {
+                TextButton(onClick = { vm.clearError(); vm.retry() }) { Text("Retry") }
+              }
+            },
+          )
+        }
+      }
     }
+
     if (streaming) LinearProgressIndicator(Modifier.fillMaxWidth())
-    Row(Modifier.fillMaxWidth().padding(8.dp)) {
-      // §7 input: text + attach + voice + model + send/stop
-      OutlinedTextField(input, { input = it }, Modifier.weight(1f), placeholder = { Text("Message Nova…") })
-      if (streaming) Button(onClick = { vm.stop() }) { Text("Stop") }
-      else Button(onClick = { vm.send(input); input = "" }) { Text("Send") }
+
+    Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
+      // §7 input: text + attach + voice + model + send/stop.
+      OutlinedTextField(
+        value = input,
+        onValueChange = { input = it },
+        modifier = Modifier.weight(1f),
+        placeholder = { Text("Message Nova...") },
+        maxLines = 6, // expands naturally for longer messages (§7)
+      )
+      Spacer(Modifier.width(8.dp))
+      if (streaming) {
+        Button(onClick = { vm.stop() }) { Text("Stop") }
+      } else {
+        Button(
+          onClick = { vm.send(input); input = "" },
+          enabled = input.isNotBlank() && !streaming,
+        ) { Text("Send") }
+      }
     }
   }
 }
