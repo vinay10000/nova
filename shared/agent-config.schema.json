@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentConfig (§13)",
+  "type": "object",
+  "required": ["name", "goal", "instructions", "tools"],
+  "properties": {
+    "name": { "type": "string", "example": "GitHub Daily Digest" },
+    "description": { "type": "string" },
+    "goal": { "type": "string" },
+    "instructions": { "type": "string" },
+    "tools": { "type": "array", "items": { "type": "string" }, "example": ["github.list_issues", "github.list_pull_requests"] },
+    "permissions": { "type": "array", "items": { "type": "string" } },
+    "schedule": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["once", "recurring", "run_now"] },
+        "frequency": { "enum": ["daily", "weekdays", "weekly", "once"] },
+        "time": { "type": "string", "example": "09:00" },
+        "timezone": { "type": "string" }
+      }
+    },
+    "status": { "enum": ["draft", "active", "paused"] }
+  }
+}

@@ -1,0 +1,170 @@
+import Fastify from 'fastify';
+import cors from '@fastify/cors';
+import { z } from 'zod';
+import { PrismaClient } from '@prisma/client';
+import { GeminiProvider, MODELS } from './ai/GeminiProvider.js';
+import { createChatService } from './services/chatService.js';
+import { prismaChatStore } from './services/prismaChatStore.js';
+import { hashPassword, issueToken, requireUser, verifyPassword } from './auth.js';
+
+const app = Fastify({ logger: true });
+await app.register(cors, { origin: true });
+
+const db = new PrismaClient();
+const ai = new GeminiProvider();
+const chat = createChatService(ai, prismaChatStore(db));
+
+app.get('/health', async () => ({ ok: true }));
+
+// ---- §29 auth ----------------------------------------------------------------
+
+const creds = z.object({ email: z.string().email(), password: z.string().min(8) });
+
+app.post('/v1/auth/register', async (req, reply) => {
+  const parsed = creds.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'invalid_input' });
+  const { email, password } = parsed.data;
+  if (await db.user.findUnique({ where: { email } })) {
+    return reply.code(409).send({ error: 'email_taken' });
+  }
+  const user = await db.user.create({ data: { email, passwordHash: await hashPassword(password) } });
+  return { token: await issueToken(user.id), user: { id: user.id, email: user.email } };
+});
+
+app.post('/v1/auth/login', async (req, reply) => {
+  const parsed = creds.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'invalid_input' });
+  const user = await db.user.findUnique({ where: { email: parsed.data.email } });
+  // Same response for unknown user and bad password — no account enumeration.
+  if (!user || !(await verifyPassword(parsed.data.password, user.passwordHash))) {
+    return reply.code(401).send({ error: 'invalid_credentials' });
+  }
+  return { token: await issueToken(user.id), user: { id: user.id, email: user.email } };
+});
+
+app.get('/v1/me', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return;
+  const user = await db.user.findUnique({ where: { id: userId }, select: { id: true, email: true } });
+  return user ?? reply.code(404).send({ error: 'not_found' });
+});
+
+// ---- §8 conversations --------------------------------------------------------
+
+app.get('/v1/conversations', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return;
+  const { q, archived } = req.query as { q?: string; archived?: string };
+  return {
+    conversations: await db.conversation.findMany({
+      where: {
+        userId,
+        archived: archived === 'true',
+        ...(q ? { title: { contains: q, mode: 'insensitive' as const } } : {}),
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: { id: true, title: true, archived: true, createdAt: true, updatedAt: true },
+    }),
+  };
+});
+
+app.post('/v1/conversations', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return;
+  return db.conversation.create({ data: { userId }, select: { id: true, title: true } });
+});
+
+app.get('/v1/conversations/:id', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return;
+  const { id } = req.params as { id: string };
+  const conv = await db.conversation.findFirst({
+    where: { id, userId }, // userId in the filter = isolation, not a post-check
+    include: { messages: { orderBy: { createdAt: 'asc' } } },
+  });
+  return conv ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.patch('/v1/conversations/:id', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return;
+  const { id } = req.params as { id: string };
+  const body = z.object({ title: z.string().min(1).max(200).optional(), archived: z.boolean().optional() }).safeParse(req.body);
+  if (!body.success) return reply.code(400).send({ error: 'invalid_input' });
+  const { count } = await db.conversation.updateMany({ where: { id, userId }, data: body.data });
+  if (!count) return reply.code(404).send({ error: 'not_found' });
+  return { ok: true };
+});
+
+app.delete('/v1/conversations/:id', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return;
+  const { id } = req.params as { id: string };
+  const { count } = await db.conversation.deleteMany({ where: { id, userId } });
+  if (!count) return reply.code(404).send({ error: 'not_found' });
+  return { ok: true };
+});
+
+// ---- §3/§6 streaming chat (SSE) ---------------------------------------------
+
+const streamBody = z.object({
+  conversationId: z.string().min(1),
+  message: z.string().min(1).max(32_000),
+  model: z.string().optional(),
+});
+
+app.post('/v1/chat/stream', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return;
+  const parsed = streamBody.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'invalid_input' });
+  const { conversationId, message, model } = parsed.data;
+
+  reply.raw.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  const send = (chunk: unknown) => reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
+
+  // Client disconnect (stop generation, §6) aborts the upstream Gemini stream.
+  const ac = new AbortController();
+  req.raw.on('close', () => ac.abort());
+
+  try {
+    for await (const chunk of chat.stream(conversationId, userId, message, model)) {
+      if (ac.signal.aborted) break;
+      send(chunk);
+    }
+  } catch (err) {
+    req.log.error(err);
+    const code = err instanceof Error && err.message === 'conversation_not_found' ? 'not_found' : 'upstream_error';
+    send({ type: 'error', code, retryable: code === 'upstream_error' });
+  } finally {
+    reply.raw.end();
+  }
+  return reply;
+});
+
+app.get('/v1/models', async () => ({ models: Object.values(MODELS) }));
+
+// Stubs for Phase 3-5 — contract in shared/openapi.yaml.
+app.get('/v1/agents', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return { agents: [] };
+  return { agents: await db.agent.findMany({ where: { userId } }) };
+});
+app.post('/v1/agents/:id/run', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return { status: 'QUEUED' };
+  return { agentId: (req.params as { id: string }).id, status: 'QUEUED' };
+});
+app.get('/v1/executions', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return { executions: [] };
+  return { executions: await db.execution.findMany({ where: { userId }, orderBy: { startedAt: 'desc' }, take: 50 }) };
+});
+
+const port = Number(process.env.PORT ?? 3000);
+app.listen({ port, host: '0.0.0.0' });

@@ -1,0 +1,39 @@
+openapi: 3.0.3
+info:
+  title: Nova API
+  version: 0.1.0
+  description: Chat + Agent platform. Backend owns Gemini keys. Android/web/iOS share this contract (§48).
+servers:
+  - url: http://localhost:3000
+paths:
+  /health:
+    get:
+      summary: Health
+      responses: { '200': { description: ok } }
+  /v1/chat/stream:
+    post:
+      summary: Streaming chat (SSE) — §3 normal chat
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                conversationId: { type: string }
+                message: { type: string }
+                model: { type: string, default: gemini-2.5-flash }
+      responses: { '200': { description: text/event-stream } }
+  /v1/conversations:
+    get: { summary: List/search conversations (§8), responses: { '200': { description: ok } } }
+    post: { summary: Create conversation, responses: { '200': { description: ok } } }
+  /v1/agents:
+    get: { summary: List agents (§13), responses: { '200': { description: ok } } }
+    post: { summary: Create agent config (review before activate), responses: { '200': { description: ok } } }
+  /v1/agents/{id}/run:
+    post: { summary: Run Now (§33), responses: { '200': { description: ok } } }
+  /v1/executions:
+    get: { summary: Execution history (§34-§35), responses: { '200': { description: ok } } }
+  /v1/approvals/{id}:
+    post: { summary: Approve/Reject human checkpoint (§36), responses: { '200': { description: ok } } }
+  /v1/connections:
+    get: { summary: OAuth connections (§38), responses: { '200': { description: ok } } }

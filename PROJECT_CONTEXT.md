@@ -1,0 +1,84 @@
+# Nova — Project Context (for AI agents)
+
+> Main repo: `Nova/`. Spec: `../PROMPT.md` (§0-§62). Read PROMPT.md + this file before coding.
+> Mission: ChatGPT-style Android assistant + natural-language autonomous agents. Android-first, backend owns Gemini keys, API reusable for web/iOS.
+
+## 1. Tech stack
+
+- Android: Kotlin, Jetpack Compose, Material3, Navigation Compose, ViewModel, Coroutines + StateFlow, Retrofit/OkHttp (SSE), Kotlin Serialization, Room (cache), Keystore (session only), WorkManager (local only)
+- Backend: TypeScript Node20, Fastify, SSE (`/v1/chat/stream`), Prisma + Postgres, Zod, `@google/generative-ai` server-side only
+- Infra (planned): Trigger.dev/Inngest (scheduler), n8n/Composio (integrations), Browserbase/Cloudflare/Playwright + Stagehand (browser)
+- Contracts: `shared/openapi.yaml` (REST+SSE), `shared/agent-config.schema.json`
+
+## 2. Folder structure
+
+```text
+Nova/
+├── README.md                    # mission, arch diagrams, quickstart
+├── PROJECT_CONTEXT.md           # this file — AI entry point
+├── .gitignore
+├── docker-compose.yml           # local Postgres (nova/nova)
+├── shared/
+│   ├── openapi.yaml             # /health, /v1/chat/stream, conversations, agents, run, executions, approvals, connections
+│   ├── agent-config.schema.json # Agent JSON contract (§13)
+│   └── example-agent.json       # GitHub Daily Digest example
+├── backend/
+│   ├── package.json             # fastify, @google/generative-ai, prisma, zod, tsx
+│   ├── tsconfig.json
+│   ├── .env.example             # DATABASE_URL, GEMINI_API_KEY, AUTH_JWT_SECRET — server only, never APK
+│   ├── prisma/schema.prisma     # §31: User, Conversation, Message, Attachment, Agent, Tool, AgentTool, Connection, Schedule, Execution, ExecutionStep, Memory, Usage, Notification
+│   └── src/
+│       ├── index.ts             # Fastify gateway: /health, POST /v1/chat/stream (SSE), stubs for agents/run/executions
+│       ├── ai/AIProvider.ts     # interface: streamChat(), generateAgentConfig()
+│       ├── ai/GeminiProvider.ts # Gemini impl, function-calling bridge, JSON agent-config gen
+│       ├── tools/Tool.ts        # interface Tool + runToolWithSafety() pipeline (§15,§47)
+│       ├── tools/registry.ts    # native Level-1 tools: github.list_issues, web.search
+│       ├── browser/BrowserProvider.ts  # Browserbase | Cloudflare | Playwright (§23)
+│       ├── integrations/IntegrationAdapter.ts # Native | n8n (§25)
+│       └── services/
+│           ├── chatService.ts   # persist msgs, stream, auto-title (§8)
+│           └── agentService.ts  # executeAgent(): Schedule->Queue->Worker->Gemini->Tools (§32,§35)
+├── android/
+│   ├── settings.gradle.kts / build.gradle.kts / gradle.properties
+│   └── app/build.gradle.kts     # compose+buildConfig, debug API_BASE_URL=http://10.0.2.2:3000, NO keys
+│   └── app/src/main/
+│       ├── AndroidManifest.xml  # INTERNET, RECORD_AUDIO (voice §11), POST_NOTIFICATIONS (§43)
+│       └── kotlin/com/nova/app/
+│           ├── MainActivity.kt  # Material3 + light/dark entry
+│           ├── NovaNav.kt       # §5 tabs: chat|agents|activity|connections|settings, Chat start + New Chat
+│           ├── Screens.kt       # ChatScreen (+ChatViewModel streaming/stop/newChat), AgentsScreen (builder §12-14), ActivityScreen (§44), ConnectionsScreen (§38), SettingsScreen (§39,§43)
+│           ├── data/NovaApi.kt  # Retrofit interface stubs — real backend only, no fake AI (§61)
+│           └── security/SessionKeystore.kt # AES/GCM session tokens only, never Gemini keys (§46)
+└── docs/
+    ├── ARCHITECTURE.md          # chat vs agent flows, provider abstractions
+    └── SECURITY.md              # APK bans, auth, isolation, audit
+```
+
+## 3. Key flows (§3,§32)
+
+- Chat: `Android -> POST /v1/chat/stream -> chatService -> GeminiProvider.streamChat -> SSE chunks -> Android append`
+- Agent: `Schedule -> JobQueue -> agentService.executeAgent -> Gemini function-call loop -> runToolWithSafety (validate→permission→auth→approval?→execute) -> Execution + steps -> notification`
+- Agent creation (§59): `NL -> AI detects goal/tools/permissions/schedule -> asks missing -> generates JSON (schema) -> user Edit/Activate`
+
+## 4. Rules (§46,§47,§61)
+
+1. Backend owns `GEMINI_API_KEY`, DB creds, OAuth secrets. Grep APK for keys = fail.
+2. Every backend route checks auth user, per-user isolation. Never trust client userId.
+3. Least-privilege tools: `github.read` ≠ `github.write`. Approval gate for writes/sends.
+4. Provider code behind interfaces: `AIProvider`, `Tool`, `BrowserProvider`, `IntegrationAdapter`.
+5. No fake AI in prod flows. No personal-WhatsApp hacks (Business API only §20). Browser only where permitted (§18,§41).
+6. Scheduler + execution server-side; phone locked/offline must still run (§32-§33).
+7. ExecutionSteps store metadata, never tokens/secrets (§35).
+
+## 5. How to extend
+
+- New tool: add `Tool` in `backend/src/tools/registry.ts`, add row to `Tool` table, expose via `AIProvider` ToolDef, check permission in `runToolWithSafety`.
+- New integration (Level 2/3 §27): implement `IntegrationAdapter` or `BrowserProvider`, wire in `agentService`.
+- New Android screen: add route in `NovaNav.kt`, UI in `Screens.kt`, DTO in `data/`, call `shared/openapi.yaml` endpoint.
+- New model: change `model` param in `GeminiProvider`, keep `AIProvider` signature stable.
+
+## 6. MVP status (Phases §50-§56)
+
+- [x] Phase 0 boilerplate (this tree)
+- [ ] Phase 1 ChatGPT Core: auth, SSE streaming, conversations CRUD/search/archive, markdown+code, new chat/history
+- [ ] Phase 2 files+multimodal+voice | Phase 3 agent framework | Phase 4 GitHub/Gmail/Calendar/Slack/Notion | Phase 5 schedules/approvals/notifs | Phase 6 browser | Phase 7 memory/multi-agent/HITL

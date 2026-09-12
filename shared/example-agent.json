@@ -1,0 +1,7 @@
+{
+  "name": "GitHub Daily Digest",
+  "goal": "Monitor my GitHub activity",
+  "instructions": "Check assigned issues, pull requests and relevant repository activity.",
+  "tools": ["github.list_issues", "github.list_pull_requests"],
+  "schedule": { "type": "recurring", "frequency": "daily", "time": "09:00" }
+}

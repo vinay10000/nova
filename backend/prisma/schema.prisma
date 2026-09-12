@@ -1,0 +1,168 @@
+// Nova DB - section 31 core entities.
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Prisma 7: connection URL lives in prisma.config.ts, not here.
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  passwordHash  String
+  timezone      String         @default("UTC")
+  createdAt     DateTime       @default(now())
+  conversations Conversation[]
+  agents        Agent[]
+  connections   Connection[]
+  memories      Memory[]
+  usages        Usage[]
+  notifications Notification[]
+  executions    Execution[]
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  title     String    @default("New chat")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  archived  Boolean   @default(false)
+  messages  Message[]
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String
+  content        String
+  model          String?
+  createdAt      DateTime     @default(now())
+  attachments    Attachment[]
+  metadata       Json?
+}
+
+model Attachment {
+  id        String  @id @default(cuid())
+  messageId String
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  filename  String
+  mime      String
+  size      Int
+  url       String
+}
+
+model Agent {
+  id           String      @id @default(cuid())
+  userId       String
+  user         User        @relation(fields: [userId], references: [id])
+  name         String
+  description  String?
+  goal         String
+  instructions String
+  tools        Json
+  permissions  Json
+  schedule     Json?
+  status       String      @default("draft")
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  executions   Execution[]
+  agentTools   AgentTool[]
+  schedules    Schedule[]
+}
+
+model Tool {
+  id          String      @id @default(cuid())
+  name        String      @unique
+  description String
+  inputSchema Json
+  permissions Json
+  auth        String
+  agentTools  AgentTool[]
+}
+
+model AgentTool {
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  toolId  String
+  tool    Tool   @relation(fields: [toolId], references: [id])
+
+  @@id([agentId, toolId])
+}
+
+model Connection {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id])
+  provider       String
+  encryptedToken String
+  scopes         Json
+  status         String   @default("connected")
+  createdAt      DateTime @default(now())
+}
+
+model Schedule {
+  id      String   @id @default(cuid())
+  agentId String
+  agent   Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  type    String
+  cron    String?
+  runAt   DateTime?
+  timezone String?
+}
+
+model Execution {
+  id          String          @id @default(cuid())
+  agentId     String
+  agent       Agent           @relation(fields: [agentId], references: [id])
+  userId      String
+  user        User            @relation(fields: [userId], references: [id])
+  trigger     String
+  status      String
+  startedAt   DateTime        @default(now())
+  completedAt DateTime?
+  output      String?
+  error       String?
+  steps       ExecutionStep[]
+}
+
+model ExecutionStep {
+  id          String    @id @default(cuid())
+  executionId String
+  execution   Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  label       String
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+}
+
+model Memory {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  key       String
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model Usage {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  tokens    Int
+  costCents Int
+  createdAt DateTime @default(now())
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
