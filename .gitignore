@@ -10,6 +10,7 @@ android/app/build/
 android/*/build/
 *.ap_ *.apk *.aab
 keystore*.jks *.keystore
+android/debug.keystore
 
 # Node / Backend
 node_modules/
@@ -24,3 +25,8 @@ npm-debug.log* yarn-debug.log* yarn-error.log*
 .env.local
 *.log
 .vscode/
+
+emu-home/
+check-url.mjs
+check-sdk-req.mjs
+emu-tmp/

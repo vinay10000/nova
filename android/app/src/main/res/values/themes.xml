@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- §4 Material3: theme resolves to platform light/dark; colors come from Compose in code. -->
+  <style name="Theme.Nova" parent="android:Theme.Material.Light.NoActionBar">
+    <item name="android:windowBackground">@android:color/white</item>
+  </style>
+</resources>

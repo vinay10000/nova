@@ -10,6 +10,40 @@ paths:
     get:
       summary: Health
       responses: { '200': { description: ok } }
+  /v1/auth/register:
+    post:
+      summary: Register (§29) — returns { token, user }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string, minLength: 8 }
+      responses: { '200': { description: ok }, '409': { description: email_taken } }
+  /v1/auth/login:
+    post:
+      summary: Login (§29) — same response for unknown user and bad password
+      responses: { '200': { description: ok }, '401': { description: invalid_credentials } }
+  /v1/me:
+    get:
+      summary: Current user from session token (§29 — never trusts client userId)
+      responses: { '200': { description: ok }, '401': { description: unauthenticated } }
+  /v1/models:
+    get:
+      summary: Model registry for the §7 selector
+      responses: { '200': { description: ok } }
+  /v1/conversations:
+    get:
+      summary: List/search conversations (§8) — q, archived query params
+      responses: { '200': { description: ok } }
+    post: { summary: Create conversation, responses: { '200': { description: ok } } }
+  /v1/conversations/{id}:
+    get: { summary: Conversation + messages, responses: { '200': { description: ok }, '404': { description: not_found } } }
+    patch: { summary: Rename/archive (§8), responses: { '200': { description: ok } } }
+    delete: { summary: Delete (§8), responses: { '200': { description: ok } } }
   /v1/chat/stream:
     post:
       summary: Streaming chat (SSE) — §3 normal chat
@@ -18,14 +52,12 @@ paths:
           application/json:
             schema:
               type: object
+              required: [conversationId, message]
               properties:
                 conversationId: { type: string }
-                message: { type: string }
-                model: { type: string, default: gemini-2.5-flash }
+                message: { type: string, maxLength: 32000 }
+                model: { type: string }
       responses: { '200': { description: text/event-stream } }
-  /v1/conversations:
-    get: { summary: List/search conversations (§8), responses: { '200': { description: ok } } }
-    post: { summary: Create conversation, responses: { '200': { description: ok } } }
   /v1/agents:
     get: { summary: List agents (§13), responses: { '200': { description: ok } } }
     post: { summary: Create agent config (review before activate), responses: { '200': { description: ok } } }

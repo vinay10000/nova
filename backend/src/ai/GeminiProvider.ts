@@ -28,8 +28,9 @@ export class GeminiProvider implements AIProvider {
    */
   async *streamChat(
     messages: ChatMessage[],
-    opts?: { model?: string; tools?: ToolDef[]; previousInteractionId?: string; functionResults?: FunctionResultInput[] },
+    opts?: { model?: string; tools?: ToolDef[]; previousInteractionId?: string; functionResults?: FunctionResultInput[]; signal?: AbortSignal },
   ): AsyncGenerator<StreamChunk> {
+    opts?.signal?.throwIfAborted?.();
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
     const turns = messages.filter((m) => m.role !== 'system');
 
@@ -46,6 +47,7 @@ export class GeminiProvider implements AIProvider {
     });
 
     for await (const event of stream) {
+      if (opts?.signal?.aborted) break;
       if (event.event_type === 'step.delta' && event.delta?.type === 'text') {
         yield { type: 'token', text: event.delta.text };
       }

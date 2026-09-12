@@ -3,10 +3,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "start": "node dist/index.js"
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "test": "tsx src/tools/Tool.test.ts && tsx src/auth.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",

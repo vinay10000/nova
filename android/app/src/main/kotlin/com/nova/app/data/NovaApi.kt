@@ -97,7 +97,13 @@ interface NovaApi {
 
   @retrofit2.http.GET("/v1/conversations/{id}")
   suspend fun conversation(@retrofit2.http.Path("id") id: String): ConversationDetailDto
+
+  @retrofit2.http.GET("/v1/models")
+  suspend fun models(): ModelsResponse
 }
+
+@Serializable data class ModelDto(val id: String)
+@Serializable data class ModelsResponse(val models: List<ModelDto>)
 
 @Serializable data class LoginRequest(val email: String, val password: String)
 @Serializable data class AuthResponse(val token: String)
