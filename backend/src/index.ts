@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { createHash } from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { GoogleGenAI } from '@google/genai';
 import { OpenAIProvider, MODELS } from './ai/OpenAIProvider.js';
 import { createChatService, ConversationNotFoundError } from './services/chatService.js';
 import { executeAgent, scopesForTools } from './services/agentService.js';
@@ -13,6 +14,14 @@ import { prismaChatStore } from './services/prismaChatStore.js';
 import { prismaAttachmentSource } from './services/prismaAttachmentSource.js';
 import { createFileService, MAX_FILE_BYTES } from './services/fileService.js';
 import { hashPassword, issueToken, requireUser, verifyPassword } from './auth.js';
+import {
+  buildGitHubAuthorizeUrl,
+  exchangeCodeForToken,
+  storeGitHubConnection,
+  getGitHubUser,
+  disconnectGitHub,
+} from './integrations/github.js';
+import { chatPlugins } from './services/chatPlugins.js';
 
 const app = Fastify({ logger: true });
 
@@ -36,7 +45,7 @@ if (!process.env.AI_API_KEY) {
 // Prisma 7 requires a driver adapter; pg connects directly to Postgres.
 const db = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) });
 const ai = new OpenAIProvider();
-const chat = createChatService(ai, prismaChatStore(db), prismaAttachmentSource(db));
+const chat = createChatService(ai, prismaChatStore(db), prismaAttachmentSource(db), db);
 const files = createFileService(db);
 await app.register(multipart, { limits: { fileSize: MAX_FILE_BYTES } });
 
@@ -250,12 +259,13 @@ app.post('/v1/chat/stream', async (req, reply) => {
 
 app.get('/v1/models', async () => ({ models: Object.values(MODELS) }));
 
-// ---- §11 output: remote TTS via OpenRouter (Fish Audio S2.1), swappable with device TTS ----
+// ---- §11 output: remote TTS via Gemini 2.5 Flash Native Audio Dialog, swappable with device TTS ----
 
-const OPENROUTER_TTS_MODEL = process.env.OPENROUTER_TTS_MODEL ?? 'fish-audio/s2.1-pro-free:free';
+const GEMINI_TTS_MODEL = 'gemini-2.5-flash-preview-native-audio-dialog';
+const geminiTts = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
 
-// OpenRouter's /audio/speech returns raw 16-bit mono PCM; wrap a 44-byte WAV header
-// so the Android MediaPlayer can play it without extra client code.
+// Gemini native audio returns base64-encoded linear16 PCM at 24 kHz mono;
+// wrap a 44-byte WAV header so Android MediaPlayer can play it directly.
 function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
   const h = Buffer.alloc(44);
   h.write('RIFF', 0);
@@ -285,7 +295,7 @@ function ttsCacheKey(text: string): string {
 app.post('/v1/tts', async (req, reply) => {
   const userId = await requireUser(req, reply);
   if (!userId) return reply;
-  if (!process.env.OPENROUTER_API_KEY) return reply.code(503).send({ error: 'tts_unconfigured' });
+  if (!process.env.GEMINI_API_KEY) return reply.code(503).send({ error: 'tts_unconfigured' });
   const body = z.object({ text: z.string().min(1).max(4000) }).safeParse(req.body);
   if (!body.success) return reply.code(400).send({ error: 'invalid_input' });
 
@@ -295,19 +305,26 @@ app.post('/v1/tts', async (req, reply) => {
     return reply.header('Content-Type', 'audio/wav').header('X-TTS-Cache', 'hit').send(cached);
   }
 
-  const r = await fetch('https://openrouter.ai/api/v1/audio/speech', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json',
+  const response = await geminiTts.models.generateContent({
+    model: GEMINI_TTS_MODEL,
+    contents: body.data.text,
+    config: {
+      responseModalities: ['AUDIO'],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: {
+            voiceName: 'Kore',
+          },
+        },
+      },
     },
-    body: JSON.stringify({ model: OPENROUTER_TTS_MODEL, input: body.data.text }),
   }).catch(() => null);
-  if (!r || !r.ok) return reply.code(502).send({ error: 'tts_upstream_error' });
 
-  const pcm = Buffer.from(await r.arrayBuffer());
-  const rate = Number((r.headers.get('content-type') ?? '').match(/rate=(\d+)/)?.[1] ?? 44100);
-  const wav = pcmToWav(pcm, rate);
+  const audioB64 = response?.data;
+  if (!audioB64) return reply.code(502).send({ error: 'tts_upstream_error' });
+
+  const pcm = Buffer.from(audioB64, 'base64');
+  const wav = pcmToWav(pcm, 24000); // Gemini native audio = 24 kHz mono
 
   // Evict oldest entry if over cap
   if (ttsCache.size >= TTS_CACHE_MAX) {
@@ -509,6 +526,97 @@ app.post('/v1/approvals/:id', async (req, reply) => {
 app.get('/v1/tools', async () => ({
   tools: [...toolRegistry.values()].map((t) => ({ id: t.id, description: t.description, scope: t.scope, isWrite: t.isWrite })),
 }));
+
+// §42: Chat plugins — @mentions that activate tool-backed conversations.
+app.get('/v1/plugins', async () => ({
+  plugins: chatPlugins.map((p) => ({ id: p.id, name: p.name, tools: p.toolIds })),
+}));
+
+// ---- §38 Connections: OAuth flow + status ------------------------------------
+
+// §38: list all connections for the authenticated user (no tokens exposed).
+app.get('/v1/connections', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const conns = await db.connection.findMany({
+    where: { userId },
+    select: { provider: true, status: true, scopes: true, providerLogin: true, createdAt: true },
+  });
+  return { connections: conns };
+});
+
+// §38: Start GitHub OAuth — returns the authorization URL to redirect to.
+app.get('/v1/connections/github/authorize', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  try {
+    const { url, state, codeVerifier } = buildGitHubAuthorizeUrl(userId);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    await db.oAuthState.create({
+      data: {
+        state,
+        userId,
+        provider: 'github',
+        codeVerifier,
+        scopes: GITHUB_READ_SCOPES.join(','),
+        expiresAt,
+      },
+    });
+    return { url, state };
+  } catch (err) {
+    req.log.error(err);
+    return reply.code(500).send({ error: 'github_oauth_config_error' });
+  }
+});
+
+const GITHUB_READ_SCOPES = ['read:user', 'repo', 'read:org'];
+
+// §38: GitHub OAuth callback — exchanges code for token, stores encrypted connection.
+// This is a backend-only endpoint that redirects to the app via deep link.
+app.get('/v1/connections/github/callback', async (req, reply) => {
+  const { code, state } = req.query as { code?: string; state?: string };
+  if (!code || !state) return reply.code(400).send({ error: 'missing_code_or_state' });
+
+  // Look up the state row
+  const stateRow = await db.oAuthState.findUnique({ where: { state } });
+  if (!stateRow) return reply.code(400).send({ error: 'invalid_state' });
+  if (stateRow.expiresAt < new Date()) {
+    await db.oAuthState.delete({ where: { state } });
+    return reply.code(400).send({ error: 'state_expired' });
+  }
+
+  try {
+    const tokens = await exchangeCodeForToken(code, stateRow.codeVerifier);
+    await storeGitHubConnection(db, stateRow.userId, tokens);
+    await db.oAuthState.delete({ where: { state } });
+    // Redirect to the Android app via deep link — the app resumes from the Connections screen.
+    const deepLink = process.env.DEEP_LINK_SCHEME ?? 'nova';
+    return reply.redirect(`${deepLink}://connections/github/connected`);
+  } catch (err) {
+    req.log.error(err);
+    await db.oAuthState.delete({ where: { state } }).catch(() => {});
+    return reply.code(500).send({ error: 'github_token_exchange_failed' });
+  }
+});
+
+// §38: Disconnect GitHub — removes the connection row.
+app.delete('/v1/connections/github', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const removed = await disconnectGitHub(db, userId);
+  return { ok: removed };
+});
+
+// §38: Get current GitHub connection status (lightweight check for polling).
+app.get('/v1/connections/github/status', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const conn = await db.connection.findFirst({
+    where: { userId, provider: 'github' },
+    select: { status: true, providerLogin: true, scopes: true, createdAt: true },
+  });
+  return { connected: conn?.status === 'connected', login: conn?.providerLogin ?? null, scopes: conn?.scopes ?? [] };
+});
 
 const port = Number(process.env.PORT ?? 3000);
 // On Vercel the Fastify instance is driven by the serverless handler in api/index.js;

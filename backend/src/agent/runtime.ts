@@ -52,7 +52,7 @@ export async function gateToolCall(
   const conn = serverKeyed || !tool
     ? null
     : await db.connection.findFirst({ where: { userId: agent.userId, provider, status: 'connected' } });
-  return runToolWithSafety(tool, toolId, args, { userId: agent.userId, agentId: agent.id, permissions: scopes }, {
+  return runToolWithSafety(tool, toolId, args, { userId: agent.userId, agentId: agent.id, permissions: scopes, db }, {
     hasPermission: toolIds.includes(toolId),
     hasAuth: serverKeyed || !!conn,
   });

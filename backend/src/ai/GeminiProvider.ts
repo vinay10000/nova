@@ -3,7 +3,7 @@ import type { AIProvider, ChatMessage, InlinePart, StreamChunk, ToolDef } from '
 
 // Verified model IDs (ai.google.dev/gemini-api/docs/models). Chat-capable models only —
 // the model selector serves this list, so audio/image variants must not leak in.
-// TTS output = Fish Audio S2.1 via OpenRouter (/v1/tts); STT = Android SpeechRecognizer.
+// TTS output = Gemini 2.5 Flash Native Audio Dialog (/v1/tts); STT = Android SpeechRecognizer.
 export const MODELS = {
   chat: 'gemini-3.5-flash-lite',
   cheap: 'gemini-3.5-flash-lite',

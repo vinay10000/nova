@@ -1,5 +1,13 @@
 // §15 generic tool abstraction + §47 safety pipeline.
-export interface ToolContext { userId: string; agentId: string; permissions: string[]; }
+import type { PrismaClient } from '@prisma/client';
+
+export interface ToolContext {
+  userId: string;
+  agentId: string;
+  permissions: string[];
+  /** §46: DB access for fetching encrypted tokens — never logged, never in ExecutionStep metadata. */
+  db: PrismaClient;
+}
 
 export interface Tool {
   id: string; // e.g. github.list_issues

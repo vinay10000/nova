@@ -52,7 +52,7 @@ fun NovaNav(session: SessionToken, onAccentChanged: () -> Unit = {}) {
         exitTransition = { fadeOut(tween(150)) },
         popEnterTransition = { fadeIn(tween(200)) },
         popExitTransition = { fadeOut(tween(150)) },
-      ) { ConnectionsScreen() }
+      ) { ConnectionsScreen(api, session) }
       composable(
         "settings",
         enterTransition = { fadeIn(tween(200)) },

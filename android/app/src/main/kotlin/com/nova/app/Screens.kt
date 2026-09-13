@@ -1389,21 +1389,48 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   }
 }
 
-@Composable fun ConnectionsScreen() {
-  data class ConnectionItem(val name: String, val desc: String, val glyph: String, val connected: Boolean = true)
-  var items by remember {
-    mutableStateOf(
-      listOf(
-        ConnectionItem("GitHub", "Issues and pull requests your agents can read.", "G", connected = true),
-        ConnectionItem("Gmail", "Search and draft mail, never send without asking.", "M", connected = true),
-        ConnectionItem("Slack", "Summaries from the channels you pick.", "S", connected = true),
-        ConnectionItem("Notion", "Pages and notes, kept in sync.", "N", connected = false),
-        ConnectionItem("X", "Listen for mentions that matter.", "X", connected = false),
-      )
-    )
-  }
+@Composable fun ConnectionsScreen(api: NovaApi, session: SessionToken) {
+  val scope = rememberCoroutineScope()
+  val context = LocalContext.current
   val scheme = MaterialTheme.colorScheme
-  val live = items.count { it.connected }
+  var connections by remember { mutableStateOf<List<com.nova.app.data.ConnectionDto>>(emptyList()) }
+  var loading by remember { mutableStateOf(true) }
+  var error by remember { mutableStateOf<String?>(null) }
+  var connecting by remember { mutableStateOf<String?>(null) }
+
+  fun refresh() {
+    scope.launch {
+      loading = true; error = null
+      runCatching { api.connections() }
+        .onSuccess { connections = it.connections }
+        .onFailure { error = "Unable to load connections" }
+      loading = false
+    }
+  }
+
+  // §38: Refresh on first load AND when the user returns from the OAuth browser flow.
+  // OnResume fires every time the composable becomes visible — including after the browser redirect.
+  val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+  androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+    val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+      if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) refresh()
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+  }
+
+  // §17 providers — read-only descriptions. The real state comes from the backend.
+  data class ProviderInfo(val id: String, val name: String, val desc: String, val glyph: String)
+  val providers = listOf(
+    ProviderInfo("github", "GitHub", "Issues and pull requests your agents can read.", "G"),
+    ProviderInfo("gmail", "Gmail", "Search and draft mail, never send without asking.", "M"),
+    ProviderInfo("slack", "Slack", "Summaries from the channels you pick.", "S"),
+    ProviderInfo("notion", "Notion", "Pages and notes, kept in sync.", "N"),
+    ProviderInfo("x", "X", "Listen for mentions that matter.", "X"),
+  )
+
+  val connectedProviders = connections.filter { it.status == "connected" }.map { it.provider }.toSet()
+  val live = connectedProviders.size
 
   LazyColumn(
     modifier = Modifier.fillMaxSize().background(scheme.surface).padding(horizontal = 20.dp),
@@ -1411,39 +1438,87 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     item {
-      Text("$live of ${items.size} live", fontFamily = NovaMono, style = MaterialTheme.typography.labelMedium, color = scheme.primary)
+      Text("$live of ${providers.size} live", fontFamily = NovaMono, style = MaterialTheme.typography.labelMedium, color = scheme.primary)
       Spacer(Modifier.height(6.dp))
       Text("Tied together.", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineLarge, color = scheme.onSurface)
       Spacer(Modifier.height(8.dp))
       Text("Agents borrow these accounts. Nothing runs without your say.", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
       Spacer(Modifier.height(6.dp))
     }
-    items(items.size) { i ->
-      val c = items[i]
+    if (loading) {
+      item { LinearProgressIndicator(Modifier.fillMaxWidth(), color = scheme.primary, trackColor = scheme.outlineVariant) }
+    }
+    error?.let { e ->
+      item { Text(e, color = scheme.error, style = MaterialTheme.typography.bodyMedium) }
+    }
+    items(providers.size) { i ->
+      val p = providers[i]
+      val connected = p.id in connectedProviders
+      val conn = connections.firstOrNull { it.provider == p.id }
+      val isConnecting = connecting == p.id
       Surface(shape = RoundedCornerShape(20.dp), color = scheme.surfaceVariant, tonalElevation = 1.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-          // Bare serif glyph as the mark. No tile, no box behind it.
-          Text(c.glyph, fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineMedium, color = if (c.connected) scheme.primary else scheme.onSurfaceVariant, modifier = Modifier.width(34.dp))
+          Text(p.glyph, fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineMedium, color = if (connected) scheme.primary else scheme.onSurfaceVariant, modifier = Modifier.width(34.dp))
           Column(modifier = Modifier.weight(1f)) {
-            Text(c.name, fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
+            Text(p.name, fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
             Spacer(Modifier.height(2.dp))
-            Text(c.desc, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+            Text(p.desc, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
             Spacer(Modifier.height(2.dp))
-            Text(
-              if (c.connected) "Connected" else "Not connected",
-              fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall,
-              color = if (c.connected) scheme.secondary else scheme.onSurfaceVariant,
-            )
+            if (connected && conn?.providerLogin != null) {
+              Text(
+                "Connected as ${conn.providerLogin}",
+                fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall,
+                color = scheme.secondary,
+              )
+            } else {
+              Text(
+                if (connected) "Connected" else "Not connected",
+                fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall,
+                color = if (connected) scheme.secondary else scheme.onSurfaceVariant,
+              )
+            }
           }
           Spacer(Modifier.width(8.dp))
-          if (c.connected) {
-            Switch(
-              checked = true,
-              onCheckedChange = { items = items.toMutableList().also { it[i] = c.copy(connected = false) } },
-            )
+          if (connected) {
+            // §38: disconnect removes the connection row server-side
+            TextButton(onClick = {
+              scope.launch {
+                when (p.id) {
+                  "github" -> runCatching { api.disconnectGitHub() }.onSuccess { refresh() }
+                }
+              }
+            }) {
+              Text("Disconnect", color = scheme.error, style = MaterialTheme.typography.labelMedium)
+            }
+          } else if (p.id == "github") {
+            // §38: GitHub OAuth — redirect user to GitHub to authorize
+            TextButton(
+              enabled = !isConnecting,
+              onClick = {
+                scope.launch {
+                  connecting = p.id
+                  runCatching { api.githubAuthorize() }
+                    .onSuccess { auth ->
+                      // Open GitHub OAuth in the browser — user authorizes there.
+                      // Backend callback redirects to nova://connections/github/connected.
+                      val intent = Intent(Intent.ACTION_VIEW, Uri.parse(auth.url))
+                      context.startActivity(intent)
+                    }
+                    .onFailure { error = "Could not start GitHub connection. Check backend config." }
+                  connecting = null
+                }
+              },
+            ) {
+              if (isConnecting) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = scheme.primary)
+              } else {
+                Text("Connect", color = scheme.primary, fontWeight = FontWeight.Bold)
+              }
+            }
           } else {
-            TextButton(onClick = { items = items.toMutableList().also { it[i] = c.copy(connected = true) } }) {
-              Text("Connect", color = scheme.primary, fontWeight = FontWeight.Bold)
+            // Other providers — not yet wired (Phase 4+)
+            TextButton(enabled = false, onClick = {}) {
+              Text("Soon", color = scheme.onSurfaceVariant.copy(alpha = 0.5f), style = MaterialTheme.typography.labelMedium)
             }
           }
         }

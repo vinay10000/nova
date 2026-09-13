@@ -67,7 +67,7 @@ paths:
     get: { summary: File metadata (§10 — binary stays server-side), responses: { '200': { description: ok }, '404': { description: not_found } } }
   /v1/tts:
     post:
-      summary: Text-to-speech (§11) — remote engine, returns audio/wav; device TTS is the fallback
+      summary: Text-to-speech (§11) — Gemini 2.5 Flash Native Audio Dialog, returns audio/wav; device TTS is the fallback
       responses: { '200': { description: audio/wav }, '503': { description: tts_unconfigured } }
   /v1/agents:
     get: { summary: List agents (§13), responses: { '200': { description: ok } } }

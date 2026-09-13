@@ -3,7 +3,9 @@
 import assert from 'node:assert/strict';
 import { runToolWithSafety, type Tool, type ToolContext } from './Tool.js';
 
-const ctx: ToolContext = { userId: 'u1', agentId: 'a1', permissions: ['github.issues.read'] };
+// Mock db — test tools don't actually use it (the test calls are gated before execute).
+const mockDb = {} as ToolContext['db'];
+const ctx: ToolContext = { userId: 'u1', agentId: 'a1', permissions: ['github.issues.read'], db: mockDb };
 
 const readTool: Tool = {
   id: 'github.list_issues',

@@ -91,9 +91,8 @@ class VoiceOutput(context: Context) {
 }
 
 /**
- * §11 remote engine: backend /v1/tts (OpenRouter Fish Audio S2.1, WAV). Returns false on any
- * failure so the caller falls back to device TTS — the free OpenRouter tier has no
- * availability guarantees. Same interface idea as VoiceOutput, still swappable.
+ * §11 remote engine: backend /v1/tts (Gemini 2.5 Flash Native Audio Dialog, WAV). Returns false on any
+ * failure so the caller falls back to device TTS. Same interface idea as VoiceOutput, still swappable.
  */
 class RemoteVoiceOutput(private val tokenProvider: () -> String?) {
   private val json = kotlinx.serialization.json.Json

@@ -1,4 +1,6 @@
-import type { AIProvider, InlinePart, StreamChunk } from '../ai/AIProvider.js';
+import type { AIProvider, ChatMessage, InlinePart, StreamChunk } from '../ai/AIProvider.js';
+import type { PrismaClient } from '@prisma/client';
+import { detectPlugin, pluginToolDefs, executePluginTool, MAX_PLUGIN_STEPS, type ChatPlugin } from './chatPlugins.js';
 
 export interface ChatStore {
   loadMessages(conversationId: string, userId: string): Promise<{ role: string; content: string }[]>;
@@ -31,7 +33,8 @@ export interface StreamOptions {
 }
 
 // §48 Chat Service -> Gemini Gateway. Persists Conversation/Message (§8), streams via SSE.
-export function createChatService(ai: AIProvider, store: ChatStore, attachments?: AttachmentSource) {
+// §42: supports @plugin mentions that activate tool-backed conversations.
+export function createChatService(ai: AIProvider, store: ChatStore, attachments?: AttachmentSource, db?: PrismaClient) {
   return {
     async *stream(opts: StreamOptions): AsyncGenerator<StreamChunk> {
       const { conversationId, userId, message, model, signal } = opts;
@@ -65,14 +68,99 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
       const hasImage = inlineParts.some((p) => p.mime.startsWith('image/'));
       const resolvedModel = hasImage && !model ? 'stepfun-3.7-flash' : model;
 
+      // §42: detect @plugin mentions (e.g. @github, @gmail)
+      const pluginMatch = detectPlugin(message);
+      const activePlugin: ChatPlugin | null = pluginMatch?.plugin ?? null;
+      const userQuery = pluginMatch?.cleanedMessage ?? message;
+
+      // Build the message history for Gemini
+      const chatHistory: ChatMessage[] = [
+        ...history.map((m) => ({ role: m.role as 'user' | 'model', content: m.content })),
+        { role: 'user' as const, content: userQuery },
+      ];
+
+      // If a plugin is active, add system instruction and tools
+      const pluginTools = activePlugin ? pluginToolDefs(activePlugin) : undefined;
+      const systemMessage = activePlugin ? activePlugin.systemInstruction : undefined;
+
       let full = '';
-      for await (const chunk of ai.streamChat(
-        [...history.map((m) => ({ role: m.role as 'user' | 'model', content: m.content })), { role: 'user' as const, content: message }],
-        { model: resolvedModel, signal, attachments: inlineParts, extractedText },
-      )) {
+      let toolSteps = 0;
+
+      // §42: tool loop for plugins — stream, execute tools, feed back, repeat.
+      // Bounded by MAX_PLUGIN_STEPS to keep chat responsive (§46).
+      const messages: ChatMessage[] = systemMessage
+        ? [{ role: 'system' as const, content: systemMessage }, ...chatHistory]
+        : chatHistory;
+
+      let currentMessages = [...messages];
+      let pendingResults: { type: 'function_result'; name: string; call_id: string; result: string; is_error?: boolean }[] | undefined;
+
+      while (toolSteps <= MAX_PLUGIN_STEPS) {
         if (signal?.aborted) break;
-        if (chunk.type === 'token') full += chunk.text;
-        yield chunk;
+
+        const streamOpts: Record<string, unknown> = {
+          model: resolvedModel,
+          signal,
+          attachments: inlineParts,
+          extractedText,
+        };
+        if (pluginTools?.length) streamOpts.tools = pluginTools;
+        if (pendingResults?.length) streamOpts.functionResults = pendingResults;
+
+        pendingResults = undefined;
+        let sawToolCall = false;
+        const toolCalls: { toolId: string; callId: string; args: unknown }[] = [];
+
+        for await (const chunk of ai.streamChat(currentMessages, streamOpts as Parameters<AIProvider['streamChat']>[1])) {
+          if (signal?.aborted) break;
+
+          if (chunk.type === 'token') {
+            full += chunk.text;
+            yield chunk;
+          } else if (chunk.type === 'tool_call' && chunk.toolId) {
+            sawToolCall = true;
+            toolCalls.push({ toolId: chunk.toolId, callId: chunk.callId ?? `plugin:${toolSteps}:${toolCalls.length}`, args: chunk.args ?? {} });
+            // Yield a step event so the UI can show "Checking GitHub..."
+            yield { type: 'step', label: chunk.toolId };
+          } else if (chunk.type === 'done') {
+            // done from this turn
+          } else if (chunk.type === 'error') {
+            yield chunk;
+            return;
+          }
+        }
+
+        // If no tool calls, we're done — the model produced a text response
+        if (!sawToolCall || !toolCalls.length) break;
+        if (toolSteps >= MAX_PLUGIN_STEPS) {
+          yield { type: 'step', label: 'Plugin step limit reached' };
+          break;
+        }
+
+        // Execute tool calls and prepare results for the next turn
+        if (db) {
+          const results: { type: 'function_result'; name: string; call_id: string; result: string; is_error?: boolean }[] = [];
+          for (const tc of toolCalls) {
+            const { result, isError } = await executePluginTool(db, userId, tc.toolId, tc.args);
+            results.push({
+              type: 'function_result',
+              name: tc.toolId,
+              call_id: tc.callId,
+              result,
+              ...(isError ? { is_error: true } : {}),
+            });
+          }
+          pendingResults = results;
+        }
+
+        toolSteps++;
+        // Add assistant message with tool calls to history, then user message with results
+        // (OpenAI format requires this sequence for multi-turn tool use)
+        currentMessages = [
+          ...currentMessages,
+          { role: 'model' as const, content: '' },
+          { role: 'user' as const, content: 'Here are the tool results. Summarize them for the user.' },
+        ];
       }
 
       // Persist only real content — never an empty assistant row on a failed stream.

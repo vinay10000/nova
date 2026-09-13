@@ -146,6 +146,19 @@ interface NovaApi {
     @retrofit2.http.Path("id") id: String,
     @retrofit2.http.Body body: DecideApprovalRequest,
   ): OkResponse
+
+  // §38 Connections — OAuth flow + status
+  @retrofit2.http.GET("/v1/connections")
+  suspend fun connections(): ConnectionsResponse
+
+  @retrofit2.http.GET("/v1/connections/github/authorize")
+  suspend fun githubAuthorize(): GitHubAuthorizeResponse
+
+  @retrofit2.http.GET("/v1/connections/github/status")
+  suspend fun githubStatus(): GitHubStatusResponse
+
+  @retrofit2.http.DELETE("/v1/connections/github")
+  suspend fun disconnectGitHub(): OkResponse
 }
 
 // Mirrors backend StoredFile (metadata only — bytes stay server-side, §46).
@@ -202,3 +215,9 @@ interface NovaApi {
 @Serializable data class ApprovalDto(val id: String, val toolId: String, val status: String = "pending")
 @Serializable data class ApprovalsResponse(val approvals: List<ApprovalDto> = emptyList())
 @Serializable data class DecideApprovalRequest(val decision: String) // approve | reject
+
+// §38 Connection DTOs
+@Serializable data class ConnectionDto(val provider: String, val status: String, val scopes: List<String> = emptyList(), val providerLogin: String? = null)
+@Serializable data class ConnectionsResponse(val connections: List<ConnectionDto> = emptyList())
+@Serializable data class GitHubAuthorizeResponse(val url: String, val state: String)
+@Serializable data class GitHubStatusResponse(val connected: Boolean, val login: String? = null, val scopes: List<String> = emptyList())

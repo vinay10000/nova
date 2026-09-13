@@ -103,14 +103,20 @@ model AgentTool {
 }
 
 model Connection {
-  id             String   @id @default(cuid())
-  userId         String
-  user           User     @relation(fields: [userId], references: [id])
-  provider       String
-  encryptedToken String
-  scopes         Json
-  status         String   @default("connected")
-  createdAt      DateTime @default(now())
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id])
+  provider        String
+  providerUserId  String?
+  providerLogin   String?
+  encryptedToken  String
+  scopes          Json
+  status          String    @default("connected")
+  createdAt       DateTime  @default(now())
+  lastRefreshedAt DateTime?
+
+  @@unique([userId, provider])
+  @@index([userId])
 }
 
 model Schedule {
@@ -146,6 +152,20 @@ model ExecutionStep {
   label       String
   metadata    Json?
   createdAt   DateTime  @default(now())
+}
+
+// §38 OAuth state: PKCE code_verifier + CSRF protection for provider authorization flows.
+// Short-lived — expires after 10 minutes; one row per authorization attempt.
+model OAuthState {
+  id           String   @id @default(cuid())
+  state        String   @unique
+  userId       String
+  provider     String
+  codeVerifier String
+  redirectUri  String?
+  scopes       String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
 }
 
 // §36 human checkpoint: a suspended write/send waits here for approve/reject.
