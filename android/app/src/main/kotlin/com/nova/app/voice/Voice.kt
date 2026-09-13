@@ -2,11 +2,15 @@ package com.nova.app.voice
 
 import android.content.Context
 import android.content.Intent
+import android.media.MediaPlayer
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import java.util.Locale
 
 /**
@@ -82,5 +86,44 @@ class VoiceOutput(context: Context) {
 
   fun shutdown() {
     tts?.shutdown()
+  }
+}
+
+/**
+ * §11 remote engine: backend /v1/tts (OpenRouter Fish Audio S2.1, WAV). Returns false on any
+ * failure so the caller falls back to device TTS — the free OpenRouter tier has no
+ * availability guarantees. Same interface idea as VoiceOutput, still swappable.
+ */
+class RemoteVoiceOutput(private val tokenProvider: () -> String?) {
+  private val json = kotlinx.serialization.json.Json
+  private val client = okhttp3.OkHttpClient.Builder()
+    .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+    .build()
+
+  @kotlinx.serialization.Serializable private data class TtsRequest(val text: String)
+
+  suspend fun speak(context: Context, text: String): Boolean = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    val token = tokenProvider() ?: return@withContext false
+    runCatching {
+      val body = json.encodeToString(TtsRequest.serializer(), TtsRequest(text.take(4000)))
+        .toRequestBody("application/json".toMediaTypeOrNull())
+      val req = okhttp3.Request.Builder()
+        .url(com.nova.app.BuildConfig.API_BASE_URL.trimEnd('/') + "/v1/tts")
+        .post(body)
+        .header("Authorization", "Bearer $token")
+        .build()
+      client.newCall(req).execute().use { resp ->
+        if (!resp.isSuccessful) return@use false
+        val wav = File(context.cacheDir, "nova_tts.wav")
+        wav.writeBytes(resp.body!!.bytes())
+        MediaPlayer().apply {
+          setDataSource(wav.absolutePath)
+          setOnCompletionListener { it.release() }
+          prepare()
+          start()
+        }
+        true
+      }
+    }.getOrDefault(false)
   }
 }

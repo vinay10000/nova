@@ -228,6 +228,52 @@ app.post('/v1/chat/stream', async (req, reply) => {
 
 app.get('/v1/models', async () => ({ models: Object.values(MODELS) }));
 
+// ---- §11 output: remote TTS via OpenRouter (Fish Audio S2.1), swappable with device TTS ----
+
+const OPENROUTER_TTS_MODEL = process.env.OPENROUTER_TTS_MODEL ?? 'fish-audio/s2.1-pro-free:free';
+
+// OpenRouter's /audio/speech returns raw 16-bit mono PCM; wrap a 44-byte WAV header
+// so the Android MediaPlayer can play it without extra client code.
+function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
+  const h = Buffer.alloc(44);
+  h.write('RIFF', 0);
+  h.writeUInt32LE(36 + pcm.length, 4);
+  h.write('WAVE', 8);
+  h.write('fmt ', 12);
+  h.writeUInt32LE(16, 16);
+  h.writeUInt16LE(1, 20); // PCM
+  h.writeUInt16LE(1, 22); // mono
+  h.writeUInt32LE(sampleRate, 24);
+  h.writeUInt32LE(sampleRate * 2, 28); // byte rate
+  h.writeUInt16LE(2, 32); // block align
+  h.writeUInt16LE(16, 34); // bits
+  h.write('data', 36);
+  h.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([h, pcm]);
+}
+
+app.post('/v1/tts', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  if (!process.env.OPENROUTER_API_KEY) return reply.code(503).send({ error: 'tts_unconfigured' });
+  const body = z.object({ text: z.string().min(1).max(4000) }).safeParse(req.body);
+  if (!body.success) return reply.code(400).send({ error: 'invalid_input' });
+
+  const r = await fetch('https://openrouter.ai/api/v1/audio/speech', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ model: OPENROUTER_TTS_MODEL, input: body.data.text }),
+  }).catch(() => null);
+  if (!r || !r.ok) return reply.code(502).send({ error: 'tts_upstream_error' });
+
+  const pcm = Buffer.from(await r.arrayBuffer());
+  const rate = Number((r.headers.get('content-type') ?? '').match(/rate=(\d+)/)?.[1] ?? 44100);
+  return reply.header('Content-Type', 'audio/wav').send(pcmToWav(pcm, rate));
+});
+
 // Stubs for Phase 3-5 — contract in shared/openapi.yaml.
 app.get('/v1/agents', async (req, reply) => {
   const userId = await requireUser(req, reply);

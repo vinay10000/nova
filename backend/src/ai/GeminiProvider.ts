@@ -1,15 +1,13 @@
 import { GoogleGenAI } from '@google/genai';
 import type { AIProvider, ChatMessage, InlinePart, StreamChunk, ToolDef } from './AIProvider.js';
 
-// Verified model IDs (ai.google.dev/gemini-api/docs/models).
+// Verified model IDs (ai.google.dev/gemini-api/docs/models). Chat-capable models only —
+// the model selector serves this list, so audio/image variants must not leak in.
+// TTS output = Fish Audio S2.1 via OpenRouter (/v1/tts); STT = Android SpeechRecognizer.
 export const MODELS = {
   chat: 'gemini-3.8-flash',
   cheap: 'gemini-3.5-flash-lite',
   reasoning: 'gemini-3.1-pro-preview',
-  image: 'gemini-3.1-flash-image',
-  tts: 'gemini-3.1-flash-tts-preview',
-  transcribe: 'gemini-3.5-transcribe',
-  live: 'gemini-3.1-flash-live-preview',
 } as const;
 
 // §2-§3 Gemini via backend only. Function calling is the primary tool bridge (§15).

@@ -45,6 +45,7 @@ import com.nova.app.data.ModelDto
 import com.nova.app.data.NovaApi
 import com.nova.app.data.SessionToken
 import com.nova.app.voice.AndroidVoiceInput
+import com.nova.app.voice.RemoteVoiceOutput
 import com.nova.app.voice.VoiceOutput
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -327,6 +328,11 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
   DisposableEffect(Unit) { onDispose { voice.destroy() } }
   val tts = remember { VoiceOutput(context) }
   DisposableEffect(Unit) { onDispose { tts.shutdown() } }
+  // §11 remote TTS (OpenRouter Fish Audio S2.1) first, device TTS as fallback.
+  val remoteTts = remember { RemoteVoiceOutput({ session.get() }) }
+  fun speakOut(text: String) {
+    scope.launch { if (!remoteTts.speak(context, text)) tts.speak(text) }
+  }
 
   // §10 one picker for both images and documents — the backend sniffs the real type.
   val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -440,8 +446,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
                   IconButton(onClick = { clipboard.setText(AnnotatedString(m.content)) }) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "Copy message")
                   }
-                  // §11 output: read the response aloud (swappable VoiceOutput).
-                  IconButton(onClick = { tts.speak(m.content) }) {
+                  // §11 output: read the response aloud (remote engine, device fallback).
+                  IconButton(onClick = { speakOut(m.content) }) {
                     Icon(Icons.Default.VolumeUp, contentDescription = "Read aloud")
                   }
                   // §6 share response.
