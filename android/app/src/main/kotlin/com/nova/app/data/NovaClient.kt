@@ -10,10 +10,23 @@ import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 
+import android.util.Base64
+
 class SessionToken(private val context: Context) {
   fun get(): String? = SessionKeystore.readToken(context)
   fun save(token: String) = SessionKeystore.saveToken(context, token)
   fun clear() = SessionKeystore.clearToken(context)
+
+  fun getEmail(): String? {
+    val token = get() ?: return null
+    return runCatching {
+      val parts = token.split(".")
+      if (parts.size < 2) return null
+      val payload = String(Base64.decode(parts[1], Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING))
+      val sub = Regex(""""sub"\s*:\s*"([^"]+)"""").find(payload)?.groupValues?.get(1)
+      sub
+    }.getOrNull()
+  }
 }
 
 fun createNovaApi(session: SessionToken): NovaApi {

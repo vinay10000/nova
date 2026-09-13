@@ -7,28 +7,49 @@ import android.os.Build
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Attachment
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.MailOutline
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -71,23 +92,93 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
   var password by remember { mutableStateOf("") }
   var registering by remember { mutableStateOf(false) }
   var error by remember { mutableStateOf<String?>(null) }
+  var loading by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
-  Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
-    Text("Welcome to Nova", style = MaterialTheme.typography.headlineMedium)
-    Spacer(Modifier.height(16.dp))
-    OutlinedTextField(email, { email = it }, label = { Text("Email") }, singleLine = true)
-    OutlinedTextField(password, { password = it }, label = { Text("Password") }, singleLine = true)
-    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    Spacer(Modifier.height(12.dp))
-    Button(enabled = email.isNotBlank() && password.length >= 8, onClick = {
-      scope.launch {
-        error = null
-        runCatching {
-          if (registering) api.register(LoginRequest(email, password)) else api.login(LoginRequest(email, password))
-        }.onSuccess { onAuthenticated(it.token) }
-          .onFailure { error = "Unable to ${if (registering) "create account" else "sign in"}" }
+
+  var appeared by remember { mutableStateOf(false) }
+  LaunchedEffect(Unit) { appeared = true }
+
+  Column(
+    Modifier.fillMaxSize().padding(32.dp),
+    verticalArrangement = Arrangement.Center,
+    horizontalAlignment = Alignment.CenterHorizontally,
+  ) {
+    AnimatedVisibility(
+      visible = appeared,
+      enter = fadeIn(tween(500)) + scaleIn(tween(500), initialScale = 0.85f),
+    ) {
+      Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+          "Nova",
+          style = MaterialTheme.typography.displayLarge,
+          fontWeight = FontWeight.Black,
+          color = MaterialTheme.colorScheme.primary,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+          if (registering) "Create your account" else "Welcome back",
+          style = MaterialTheme.typography.bodyLarge,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
       }
-    }) { Text(if (registering) "Create account" else "Sign in") }
+    }
+
+    Spacer(Modifier.height(48.dp))
+
+    OutlinedTextField(
+      email, { email = it },
+      label = { Text("Email") },
+      leadingIcon = { Icon(Icons.Default.Email, contentDescription = null, modifier = Modifier.size(20.dp)) },
+      singleLine = true,
+      modifier = Modifier.fillMaxWidth(),
+      shape = RoundedCornerShape(14.dp),
+    )
+    Spacer(Modifier.height(14.dp))
+    OutlinedTextField(
+      password, { password = it },
+      label = { Text("Password") },
+      leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(20.dp)) },
+      singleLine = true,
+      visualTransformation = PasswordVisualTransformation(),
+      modifier = Modifier.fillMaxWidth(),
+      shape = RoundedCornerShape(14.dp),
+    )
+    AnimatedVisibility(visible = error != null) {
+      Text(
+        error ?: "",
+        color = MaterialTheme.colorScheme.error,
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier.padding(top = 8.dp),
+      )
+    }
+    Spacer(Modifier.height(28.dp))
+    Button(
+      enabled = email.isNotBlank() && password.length >= 8 && !loading,
+      onClick = {
+        scope.launch {
+          error = null
+          loading = true
+          runCatching {
+            if (registering) api.register(LoginRequest(email, password)) else api.login(LoginRequest(email, password))
+          }.onSuccess { onAuthenticated(it.token) }
+            .onFailure { error = "Unable to ${if (registering) "create account" else "sign in"}. Check your credentials." }
+          loading = false
+        }
+      },
+      modifier = Modifier.fillMaxWidth().height(52.dp),
+      shape = RoundedCornerShape(14.dp),
+    ) {
+      if (loading) {
+        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp, color = MaterialTheme.colorScheme.onPrimary)
+      } else {
+        Text(
+          if (registering) "Create account" else "Sign in",
+          style = MaterialTheme.typography.titleMedium,
+          fontWeight = FontWeight.SemiBold,
+        )
+      }
+    }
+    Spacer(Modifier.height(16.dp))
     TextButton(onClick = { registering = !registering; error = null }) {
       Text(if (registering) "Already have an account? Sign in" else "New to Nova? Create an account")
     }
@@ -278,6 +369,51 @@ fun MarkdownBody(content: String, streaming: Boolean) {
 }
 
 @Composable
+private fun SmallIconButton(
+  icon: androidx.compose.ui.graphics.vector.ImageVector,
+  description: String,
+  onClick: () -> Unit,
+) {
+  IconButton(onClick = onClick, modifier = Modifier.size(28.dp)) {
+    Icon(icon, contentDescription = description, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+  }
+}
+
+@Composable
+private fun TypingIndicator(modifier: Modifier = Modifier) {
+  val infiniteTransition = rememberInfiniteTransition(label = "typing")
+  Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+    repeat(3) { index ->
+      val alpha by infiniteTransition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+          animation = tween(500, delayMillis = index * 180),
+          repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dot$index",
+      )
+      val scale by infiniteTransition.animateFloat(
+        initialValue = 0.75f,
+        targetValue = 1.1f,
+        animationSpec = infiniteRepeatable(
+          animation = tween(500, delayMillis = index * 180),
+          repeatMode = RepeatMode.Reverse,
+        ),
+        label = "scale$index",
+      )
+      Box(
+        Modifier
+          .size(7.dp)
+          .graphicsLayer { this.alpha = alpha; scaleX = scale; scaleY = scale }
+          .clip(CircleShape)
+          .background(MaterialTheme.colorScheme.primary)
+      )
+    }
+  }
+}
+
+@Composable
 fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewModel()) {
   LaunchedEffect(session) { vm.configureSession(session) }
   LaunchedEffect(api) { vm.configureApi(api) } // §10 uploads
@@ -351,10 +487,17 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
     drawerState = drawerState,
     drawerContent = {
       ModalDrawerSheet {
-        Text("Chats", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+        Text(
+          "Nova",
+          style = MaterialTheme.typography.titleLarge,
+          fontWeight = FontWeight.Bold,
+          modifier = Modifier.padding(20.dp),
+        )
+        HorizontalDivider()
         conversations.forEach { c ->
           ListItem(
-            headlineContent = { Text(c.title) },
+            headlineContent = { Text(c.title, maxLines = 1) },
+            leadingContent = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
             modifier = Modifier.clickable {
               scope.launch {
                 runCatching {
@@ -366,8 +509,10 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
             },
           )
         }
+        HorizontalDivider()
         ListItem(
-          headlineContent = { Text("New Chat") },
+          headlineContent = { Text("New Chat", fontWeight = FontWeight.Medium) },
+          leadingContent = { Icon(Icons.Default.Add, contentDescription = null) },
           modifier = Modifier.clickable {
             scope.launch {
               runCatching {
@@ -383,21 +528,30 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
     },
   ) {
   Column(Modifier.fillMaxSize().imePadding()) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start, verticalAlignment = Alignment.CenterVertically) {
-      TextButton(onClick = { scope.launch { drawerState.open() } }) { Text("Chats") }
-      TextButton(onClick = {
-        scope.launch { runCatching { vm.setConversation(api.createConversation().id); refreshConversations() } }
-      }) { Text("New Chat") }
-      Spacer(Modifier.weight(1f))
-      // §7 model selector.
-      if (models.isNotEmpty()) {
-        var expanded by remember { mutableStateOf(false) }
-        TextButton(onClick = { expanded = true }) { Text(model?.removePrefix("gemini-") ?: "model") }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-          models.forEach { m ->
-            DropdownMenuItem(text = { Text(m.id) }, onClick = {
-              model = m.id; vm.model = m.id; expanded = false
-            })
+    // Top bar with title and actions
+    Surface(tonalElevation = 2.dp) {
+      Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          IconButton(onClick = { scope.launch { drawerState.open() } }) {
+            Icon(Icons.Default.Menu, contentDescription = "Menu")
+          }
+          Text("Nova", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          if (models.isNotEmpty()) {
+            var expanded by remember { mutableStateOf(false) }
+            TextButton(onClick = { expanded = true }) { Text(model?.removePrefix("gemini-") ?: "model") }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+              models.forEach { m ->
+                DropdownMenuItem(text = { Text(m.id) }, onClick = {
+                  model = m.id; vm.model = m.id; expanded = false
+                })
+              }
+            }
           }
         }
       }
@@ -415,78 +569,192 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
     }
 
     LazyColumn(Modifier.weight(1f), state = listState) {
+      // Empty state with breathing animation
       if (messages.isEmpty()) {
         item {
-          Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("Start chatting — no agent knowledge needed.", style = MaterialTheme.typography.bodyLarge)
+          val infiniteTransition = rememberInfiniteTransition(label = "empty")
+          val breathe by infiniteTransition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 0.7f,
+            animationSpec = infiniteRepeatable(
+              animation = tween(2000),
+              repeatMode = RepeatMode.Reverse,
+            ),
+            label = "breathe",
+          )
+          val floatY by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = -6f,
+            animationSpec = infiniteRepeatable(
+              animation = tween(2000),
+              repeatMode = RepeatMode.Reverse,
+            ),
+            label = "float",
+          )
+          Column(
+            Modifier.fillMaxWidth().padding(48.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+          ) {
+            Icon(
+              Icons.AutoMirrored.Filled.Send,
+              contentDescription = null,
+              modifier = Modifier
+                .size(56.dp)
+                .graphicsLayer { alpha = breathe; translationY = floatY },
+              tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.height(20.dp))
+            Text(
+              "How can I help you today?",
+              style = MaterialTheme.typography.headlineMedium,
+              fontWeight = FontWeight.SemiBold,
+              color = MaterialTheme.colorScheme.onSurface,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+              "Ask me anything. I can search the web, help with code, and more.",
+              style = MaterialTheme.typography.bodyLarge,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              textAlign = TextAlign.Center,
+            )
           }
         }
       }
+
       items(messages.size) { i ->
         val m = messages[i]
         if (editIndex == i) {
           // §6 edit user message and resend.
           var text by remember(m.id) { mutableStateOf(m.content) }
           Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
-            OutlinedTextField(text, { text = it }, modifier = Modifier.weight(1f), maxLines = 6)
+            OutlinedTextField(text, { text = it }, modifier = Modifier.weight(1f), maxLines = 6, shape = RoundedCornerShape(14.dp))
             Spacer(Modifier.width(8.dp))
-            Button(onClick = { editIndex = null; vm.editAndResend(i, text) }) { Text("Send") }
+            Button(onClick = { editIndex = null; vm.editAndResend(i, text) }, shape = RoundedCornerShape(12.dp)) { Text("Send") }
             TextButton(onClick = { editIndex = null }) { Text("Cancel") }
           }
         } else {
-          ListItem(
-            headlineContent = {
-              if (m.role == "assistant" && m.content.isNotEmpty()) {
-                MarkdownBody(m.content, streaming && i == messages.lastIndex)
-              } else {
-                Text(m.content.ifEmpty { if (streaming) "…" else "" })
+          val isUser = m.role == "user"
+          val isLastMsg = i == messages.lastIndex
+          val showTyping = !isUser && m.content.isEmpty() && streaming && isLastMsg
+
+          if (showTyping) {
+            // Typing indicator
+            Row(
+              Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+              horizontalArrangement = Arrangement.Start,
+            ) {
+              Box(
+                Modifier
+                  .size(30.dp)
+                  .clip(CircleShape)
+                  .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+              ) {
+                Text("N", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold)
               }
-            },
-            supportingContent = { Text(if (m.role == "user") "You" else "Nova") },
-            trailingContent = {
-              Row {
-                if (m.role == "assistant" && m.content.isNotEmpty() && !streaming) {
-                  IconButton(onClick = { clipboard.setText(AnnotatedString(m.content)) }) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = "Copy message")
+              Spacer(Modifier.width(10.dp))
+              Surface(
+                shape = RoundedCornerShape(4.dp, 18.dp, 18.dp, 18.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                tonalElevation = 1.dp,
+              ) {
+                TypingIndicator(Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
+              }
+            }
+          } else if (m.content.isNotEmpty() || !streaming) {
+            // Chat bubble
+            Row(
+              Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+              horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+            ) {
+              if (!isUser) {
+                Box(
+                  Modifier
+                    .size(30.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                  contentAlignment = Alignment.Center,
+                ) {
+                  Text("N", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.width(10.dp))
+              }
+
+              Column(
+                modifier = Modifier.widthIn(max = 300.dp),
+                horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
+              ) {
+                Surface(
+                  shape = RoundedCornerShape(
+                    topStart = if (isUser) 18.dp else 4.dp,
+                    topEnd = if (isUser) 4.dp else 18.dp,
+                    bottomStart = 18.dp,
+                    bottomEnd = 18.dp,
+                  ),
+                  color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                  tonalElevation = if (isUser) 0.dp else 1.dp,
+                ) {
+                  if (!isUser && m.content.isNotEmpty()) {
+                    MarkdownBody(m.content, streaming && isLastMsg)
+                  } else {
+                    Text(
+                      m.content.ifEmpty { "" },
+                      modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                      color = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                   }
-                  // §11 output: read the response aloud (remote engine, device fallback).
-                  IconButton(onClick = { speakOut(m.content) }) {
-                    Icon(Icons.Default.VolumeUp, contentDescription = "Read aloud")
-                  }
-                  // §6 share response.
-                  IconButton(onClick = {
-                    val send = Intent(Intent.ACTION_SEND).apply {
-                      type = "text/plain"; putExtra(Intent.EXTRA_TEXT, m.content)
+                }
+
+                // Action buttons below bubble
+                if (m.content.isNotEmpty() && !streaming) {
+                  Row(Modifier.padding(top = 2.dp, start = if (isUser) 0.dp else 4.dp, end = if (isUser) 4.dp else 0.dp)) {
+                    if (!isUser) {
+                      SmallIconButton(Icons.Default.ContentCopy, "Copy") { clipboard.setText(AnnotatedString(m.content)) }
+                      SmallIconButton(Icons.Default.VolumeUp, "Read aloud") { speakOut(m.content) }
+                      SmallIconButton(Icons.Default.Share, "Share") {
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                          type = "text/plain"; putExtra(Intent.EXTRA_TEXT, m.content)
+                        }
+                        context.startActivity(Intent.createChooser(send, "Share response"))
+                      }
+                      SmallIconButton(Icons.Default.Refresh, "Regenerate") { vm.regenerate() }
+                    } else {
+                      SmallIconButton(Icons.Default.Edit, "Edit") { editIndex = i }
                     }
-                    context.startActivity(Intent.createChooser(send, "Share response"))
-                  }) {
-                    Icon(Icons.Default.Share, contentDescription = "Share response")
-                  }
-                  IconButton(onClick = { vm.regenerate() }) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Regenerate response")
-                  }
-                }
-                if (m.role == "user" && !streaming) {
-                  IconButton(onClick = { editIndex = i }) {
-                    Icon(Icons.Default.Edit, contentDescription = "Edit message")
                   }
                 }
               }
-            },
-          )
+
+              if (isUser) {
+                Spacer(Modifier.width(10.dp))
+                Box(
+                  Modifier
+                    .size(30.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.tertiaryContainer),
+                  contentAlignment = Alignment.Center,
+                ) {
+                  Text("Y", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onTertiaryContainer, fontWeight = FontWeight.Bold)
+                }
+              }
+            }
+          }
         }
       }
       // §6 retry affordance on failure.
       error?.let { code ->
         item {
-          ListItem(
-            headlineContent = { Text("Something went wrong: $code") },
-            trailingContent = {
-              Row {
-                TextButton(onClick = { vm.clearError(); vm.retry() }) { Text("Retry") }
-              }
-            },
-          )
+          Surface(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.errorContainer,
+          ) {
+            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+              Text("Something went wrong: $code", modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall)
+              TextButton(onClick = { vm.clearError(); vm.retry() }) { Text("Retry") }
+            }
+          }
         }
       }
     }
@@ -507,36 +775,45 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
       }
     }
 
-    Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
-      // §7 input: text, attachments (§10), voice (§11), send/stop, model selector above.
-      IconButton(onClick = { pickFile.launch("*/*") }, enabled = !uploading && !streaming) {
-        Icon(Icons.Default.Attachment, contentDescription = "Attach file")
-      }
-      if (micGranted && voice.available) {
-        IconButton(onClick = { voice.start() }) {
-          Icon(Icons.Default.Mic, contentDescription = "Voice input")
+    // Input bar
+    Surface(tonalElevation = 2.dp) {
+      Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Bottom,
+      ) {
+        IconButton(onClick = { pickFile.launch("*/*") }, enabled = !uploading && !streaming) {
+          Icon(Icons.Default.Attachment, contentDescription = "Attach file")
         }
-      } else {
-        // §43/§11: mic permission requested in context — when the user reaches for the mic.
-        IconButton(onClick = { micPermission.launch(Manifest.permission.RECORD_AUDIO) }) {
-          Icon(Icons.Default.Mic, contentDescription = "Enable voice input")
+        if (micGranted && voice.available) {
+          IconButton(onClick = { voice.start() }) {
+            Icon(Icons.Default.Mic, contentDescription = "Voice input")
+          }
+        } else {
+          IconButton(onClick = { micPermission.launch(Manifest.permission.RECORD_AUDIO) }) {
+            Icon(Icons.Default.Mic, contentDescription = "Enable voice input")
+          }
         }
-      }
-      OutlinedTextField(
-        value = input,
-        onValueChange = { input = it },
-        modifier = Modifier.weight(1f),
-        placeholder = { Text("Message Nova...") },
-        maxLines = 6, // expands naturally for longer messages (§7)
-      )
-      Spacer(Modifier.width(8.dp))
-      if (streaming) {
-        Button(onClick = { vm.stop() }) { Text("Stop") }
-      } else {
-        Button(
-          onClick = { vm.send(input); input = "" },
-          enabled = input.isNotBlank() && !streaming,
-        ) { Text("Send") }
+        OutlinedTextField(
+          value = input,
+          onValueChange = { input = it },
+          modifier = Modifier.weight(1f),
+          placeholder = { Text("Message Nova...") },
+          maxLines = 6,
+          shape = RoundedCornerShape(24.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        if (streaming) {
+          FilledIconButton(onClick = { vm.stop() }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.error)) {
+            Icon(Icons.Default.Refresh, contentDescription = "Stop", tint = MaterialTheme.colorScheme.onError)
+          }
+        } else {
+          FilledIconButton(
+            onClick = { vm.send(input); input = "" },
+            enabled = input.isNotBlank() && !streaming,
+          ) {
+            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+          }
+        }
       }
     }
   }
@@ -571,11 +848,14 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
 
   LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
     item {
-      Text("Agents", style = MaterialTheme.typography.headlineMedium)
-      Text("Describe what to automate. AI asks missing questions, then shows config for review.")
+      Text("Agents", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+      Spacer(Modifier.height(4.dp))
+      Text("Describe what to automate. AI asks missing questions, then shows config for review.",
+        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     item {
-      OutlinedTextField(nl, { nl = it }, label = { Text("e.g. brief me on Android news every morning") })
+      OutlinedTextField(nl, { nl = it }, label = { Text("e.g. brief me on Android news every morning") },
+        modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
       Spacer(Modifier.height(8.dp))
       Button(enabled = nl.isNotBlank() && !building, onClick = {
         scope.launch {
@@ -585,20 +865,21 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
             .onFailure { error = "Builder failed — check connection and retry" }
           building = false
         }
-      }) { Text(if (building) "Asking…" else "Build") }
+      }, shape = RoundedCornerShape(12.dp)) { Text(if (building) "Asking…" else "Build") }
     }
     built?.let { obj ->
       item {
         val questions = obj["questions"]?.let { runCatching { it.jsonArray.map { q -> q.jsonPrimitive.content } }.getOrNull() }
-        ElevatedCard(Modifier.fillMaxWidth()) {
-          Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+          Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (questions != null) {
-              Text("Needs a little more:")
-              questions.forEach { Text("• $it") }
+              Text("Needs a little more:", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+              questions.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
             } else {
-              Text(obj["name"]?.jsonPrimitive?.contentOrNull ?: "New agent", style = MaterialTheme.typography.titleMedium)
-              Text(obj["goal"]?.jsonPrimitive?.contentOrNull ?: "")
-              Text("Tools: " + (obj["tools"]?.jsonArray?.map { it.jsonPrimitive.content }?.joinToString() ?: "—"))
+              Text(obj["name"]?.jsonPrimitive?.contentOrNull ?: "New agent", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+              Text(obj["goal"]?.jsonPrimitive?.contentOrNull ?: "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+              Text("Tools: " + (obj["tools"]?.jsonArray?.map { it.jsonPrimitive.content }?.joinToString() ?: "—"),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
               Button(onClick = {
                 scope.launch {
                   error = null
@@ -617,7 +898,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
                     refresh()
                   }.onFailure { error = "Save failed — the builder may have named a tool that does not exist yet" }
                 }
-              }) { Text("Save & Activate") }
+              }, shape = RoundedCornerShape(12.dp)) { Text("Save & Activate") }
             }
           }
         }
@@ -625,12 +906,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
     }
     if (approvals.isNotEmpty()) {
       item {
-        ElevatedCard(Modifier.fillMaxWidth()) {
-          Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Waiting for approval", style = MaterialTheme.typography.titleMedium)
+        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+          Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Waiting for approval", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             approvals.forEach { ap ->
               Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${ap.toolId}", Modifier.weight(1f))
+                Text("${ap.toolId}", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                 TextButton(onClick = {
                   scope.launch {
                     runCatching { api.decideApproval(ap.id, com.nova.app.data.DecideApprovalRequest("reject")) }
@@ -650,26 +931,29 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
       }
     }
     if (loading) { item { LinearProgressIndicator(Modifier.fillMaxWidth()) } }
-    error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
+    error?.let { item { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) } }
     items(agents.size) { i ->
       val a = agents[i]
       ElevatedCard(Modifier.fillMaxWidth().clickable {
         selected = if (selected?.id == a.id) null else a; runOutput = null
         scope.launch { runCatching { api.agent(a.id) }.onSuccess { selected = it } }
-      }) {
-        Column(Modifier.padding(12.dp)) {
-          Text(a.name, style = MaterialTheme.typography.titleMedium)
-          Text("${a.status} • ${(a.tools).joinToString()}")
+      }, shape = RoundedCornerShape(16.dp)) {
+        Column(Modifier.padding(16.dp)) {
+          Text(a.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+          Spacer(Modifier.height(2.dp))
+          Text("${a.status} • ${(a.tools).joinToString()}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
           if (selected?.id == a.id) {
+            Spacer(Modifier.height(8.dp))
             selected?.let { d ->
-              Text(d.goal)
+              Text(d.goal, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+              Spacer(Modifier.height(8.dp))
               Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (d.status != "active") TextButton(onClick = {
+                if (d.status != "active") OutlinedButton(onClick = {
                   scope.launch { runCatching { api.activateAgent(d.id) }; refresh() }
-                }) { Text("Activate") }
-                if (d.status == "active") TextButton(onClick = {
+                }, shape = RoundedCornerShape(10.dp)) { Text("Activate") }
+                if (d.status == "active") OutlinedButton(onClick = {
                   scope.launch { runCatching { api.pauseAgent(d.id) }; refresh() }
-                }) { Text("Pause") }
+                }, shape = RoundedCornerShape(10.dp)) { Text("Pause") }
                 Button(enabled = !running, onClick = {
                   scope.launch {
                     running = true; runOutput = null
@@ -678,9 +962,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
                       .onFailure { runOutput = "[failed] run failed — retry shortly" }
                     running = false; refresh()
                   }
-                }) { Text(if (running) "Running…" else "Run Now") }
+                }, shape = RoundedCornerShape(10.dp)) { Text(if (running) "Running…" else "Run Now") }
               }
-              runOutput?.let { Text(it) }
+              runOutput?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+              }
             }
           }
         }
@@ -702,33 +989,109 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
       .onFailure { error = "Unable to load activity" }
     loading = false
   }
+
+  val emptyTransition = rememberInfiniteTransition(label = "actEmpty")
+  val emptyBreathe by emptyTransition.animateFloat(
+    initialValue = 0.35f,
+    targetValue = 0.7f,
+    animationSpec = infiniteRepeatable(tween(2000), RepeatMode.Reverse),
+    label = "actBreathe",
+  )
+
   LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-    item { Text("Activity", style = MaterialTheme.typography.headlineMedium) }
+    item {
+      Text("Activity", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+    }
     if (loading) { item { LinearProgressIndicator(Modifier.fillMaxWidth()) } }
-    error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
+    error?.let { item { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) } }
+    if (!loading && executions.isEmpty() && error == null) {
+      item {
+        Column(
+          Modifier.fillMaxWidth().padding(48.dp),
+          horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+          Icon(
+            Icons.Default.History,
+            contentDescription = null,
+            modifier = Modifier.size(56.dp).graphicsLayer { alpha = emptyBreathe },
+            tint = MaterialTheme.colorScheme.primary,
+          )
+          Spacer(Modifier.height(20.dp))
+          Text("No activity yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+          Spacer(Modifier.height(8.dp))
+          Text(
+            "Agent runs and task executions will appear here.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+          )
+        }
+      }
+    }
     items(executions.size) { i ->
       val e = executions[i]
       ElevatedCard(Modifier.fillMaxWidth().clickable {
         detail = if (detail?.id == e.id) null else e
         scope.launch { runCatching { api.execution(e.id) }.onSuccess { detail = it } }
-      }) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-          Text((e.agent?.name ?: "Agent") + " • " + e.status, style = MaterialTheme.typography.titleSmall)
+      }, shape = RoundedCornerShape(16.dp)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+          Text((e.agent?.name ?: "Agent") + " • " + e.status, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
           if (detail?.id == e.id) {
-            detail?.steps?.forEach { Text("• ${it.label}") }
-            detail?.output?.let { Text(it) }
-            detail?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            Spacer(Modifier.height(4.dp))
+            detail?.steps?.forEach { Text("• ${it.label}", style = MaterialTheme.typography.bodyMedium) }
+            detail?.output?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            detail?.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
           }
         }
       }
     }
   }
 }
+
 @Composable fun ConnectionsScreen() {
   // §38 connect/reauthorize/disconnect + inspect scopes. Tokens stay backend-encrypted.
-  Column(Modifier.fillMaxSize().padding(16.dp)) { Text("Connections", style = MaterialTheme.typography.headlineMedium); Text("GitHub/Gmail/Slack/Notion/X/WhatsApp — TODO OAuth via backend.") }
+  val services = listOf(
+    Triple("GitHub", "Repositories, issues, and PRs", Icons.Default.Code),
+    Triple("Gmail", "Read and send emails", Icons.Default.MailOutline),
+    Triple("Slack", "Workspace messaging", Icons.Default.Phone),
+    Triple("Notion", "Notes and databases", Icons.Default.Article),
+    Triple("X (Twitter)", "Social media posts", Icons.Default.Share),
+    Triple("WhatsApp", "Messaging integration", Icons.Default.Phone),
+  )
+  LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    item {
+      Text("Connections", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+      Spacer(Modifier.height(4.dp))
+      Text("Integrate your accounts to let agents work across platforms.",
+        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Spacer(Modifier.height(12.dp))
+    }
+    items(services.size) { i ->
+      val (name, desc, icon) = services[i]
+      ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+          Box(
+            Modifier
+              .size(40.dp)
+              .clip(RoundedCornerShape(12.dp))
+              .background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+          ) {
+            Icon(icon, contentDescription = name, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(20.dp))
+          }
+          Spacer(Modifier.width(14.dp))
+          Column(Modifier.weight(1f)) {
+            Text(name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(desc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+          }
+          AssistChip(onClick = {}, label = { Text("Connect") }, shape = RoundedCornerShape(10.dp))
+        }
+      }
+    }
+  }
 }
-@Composable fun SettingsScreen() {
+
+@Composable fun SettingsScreen(session: SessionToken, onLogout: () -> Unit) {
   // §43: notifications permission is requested HERE, in context of the user asking for
   // notifications — never at first launch.
   val context = LocalContext.current
@@ -740,28 +1103,84 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
     )
   }
   val request = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
-  Column(Modifier.fillMaxSize().padding(16.dp)) {
-    Text("Settings", style = MaterialTheme.typography.headlineMedium)
-    Spacer(Modifier.height(12.dp))
-    if (Build.VERSION.SDK_INT >= 33) {
-      ListItem(
-        headlineContent = { Text("Agent notifications") },
-        supportingContent = { Text(if (granted) "Allowed" else "Off — you will not hear about agent runs") },
-        trailingContent = {
-          Switch(
-            checked = granted,
-            onCheckedChange = { on ->
-              if (on) request.launch(Manifest.permission.POST_NOTIFICATIONS)
-              else context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
-              })
+
+  // Fix: check if email looks like an email, otherwise show "Signed in"
+  val rawEmail = session.getEmail()
+  val displayEmail = if (rawEmail != null && rawEmail.contains("@")) rawEmail else "Signed in"
+
+  LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    item {
+      Text("Settings", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+      Spacer(Modifier.height(8.dp))
+    }
+    // Account section
+    item {
+      ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+          Box(
+            Modifier
+              .size(44.dp)
+              .clip(CircleShape)
+              .background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+          ) {
+            Text("N", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold)
+          }
+          Spacer(Modifier.width(14.dp))
+          Column {
+            Text("Account", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(displayEmail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+          }
+        }
+      }
+    }
+    // Notifications
+    item {
+      ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+        if (Build.VERSION.SDK_INT >= 33) {
+          ListItem(
+            headlineContent = { Text("Agent notifications", fontWeight = FontWeight.Medium) },
+            supportingContent = { Text(if (granted) "Allowed" else "Off — you will not hear about agent runs") },
+            trailingContent = {
+              Switch(
+                checked = granted,
+                onCheckedChange = { on ->
+                  if (on) request.launch(Manifest.permission.POST_NOTIFICATIONS)
+                  else context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                  })
+                },
+              )
             },
           )
-        },
-      )
-    } else {
-      Text("Notifications follow the system setting (Android < 13).")
+        } else {
+          ListItem(
+            headlineContent = { Text("Agent notifications", fontWeight = FontWeight.Medium) },
+            supportingContent = { Text("Follows system setting (Android < 13)") },
+          )
+        }
+      }
     }
-    // §39 memory view/edit/delete and §12 builder prefs land with Phases 3+.
+    // About
+    item {
+      ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+        ListItem(
+          headlineContent = { Text("About", fontWeight = FontWeight.Medium) },
+          supportingContent = { Text("Nova v0.1.0") },
+        )
+      }
+    }
+    // Logout
+    item {
+      Spacer(Modifier.height(8.dp))
+      OutlinedButton(
+        onClick = onLogout,
+        modifier = Modifier.fillMaxWidth(),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        shape = RoundedCornerShape(14.dp),
+      ) {
+        Text("Sign out", fontWeight = FontWeight.Medium)
+      }
+    }
   }
 }
