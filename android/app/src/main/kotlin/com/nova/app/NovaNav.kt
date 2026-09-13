@@ -13,7 +13,7 @@ import com.nova.app.data.SessionToken
 import com.nova.app.data.createNovaApi
 
 @Composable
-fun NovaNav(session: SessionToken) {
+fun NovaNav(session: SessionToken, onAccentChanged: () -> Unit = {}) {
   val nav = rememberNavController()
   val api = remember { createNovaApi(session) }
   var authenticated by remember { mutableStateOf(session.get() != null) }
@@ -59,7 +59,14 @@ fun NovaNav(session: SessionToken) {
         exitTransition = { fadeOut(tween(150)) },
         popEnterTransition = { fadeIn(tween(200)) },
         popExitTransition = { fadeOut(tween(150)) },
-      ) { SettingsScreen(session, onLogout = { session.clear(); authenticated = false }, onBack = { nav.popBackStack() }) }
+      ) {
+        SettingsScreen(
+          session,
+          onLogout = { session.clear(); authenticated = false },
+          onBack = { nav.popBackStack() },
+          onAccentChanged = onAccentChanged,
+        )
+      }
     }
   }
 }

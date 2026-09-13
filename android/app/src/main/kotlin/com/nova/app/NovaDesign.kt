@@ -46,50 +46,100 @@ object NovaPalette {
   val FaintLight = Color(0xFF9A917E)
 }
 
-private val NovaLightScheme = lightColorScheme(
-  primary = Color(0xFF7A5320),
-  onPrimary = Color(0xFFFFFBF0),
-  primaryContainer = Color(0xFFE9E2D3),
-  onPrimaryContainer = Color(0xFF211C14),
-  secondary = Color(0xFF3E6B3A),
-  onSecondary = Color.White,
-  surface = Color(0xFFFBF9F4),
-  onSurface = Color(0xFF211C14),
-  onSurfaceVariant = Color(0xFF6B6252),
-  surfaceVariant = Color(0xFFF2EEE5),
-  surfaceContainer = Color(0xFFF2EEE5),
-  surfaceContainerHigh = Color(0xFFE9E2D3),
-  outline = Color(0xFFDDD5C2),
-  outlineVariant = Color(0xFFE7DFCC),
-  error = Color(0xFF9C3B2A),
-  errorContainer = Color(0xFFF5DCD4),
+enum class NovaAccent(val label: String) {
+  BRONZE("Bronze"),
+  SLATE("Slate"),
+  SAGE("Sage"),
+  TERRACOTTA("Terracotta"),
+  PLUM("Plum"),
+}
+
+// Tonal accent colors — desaturated, never poster-bright.
+private data class AccentPair(val darkPrimary: Color, val darkContainer: Color, val lightPrimary: Color, val lightContainer: Color)
+
+private val accentMap = mapOf(
+  NovaAccent.BRONZE to AccentPair(
+    darkPrimary = Color(0xFFE2B26B),
+    darkContainer = Color(0xFF2A2114),
+    lightPrimary = Color(0xFF7A5320),
+    lightContainer = Color(0xFFE9E2D3),
+  ),
+  NovaAccent.SLATE to AccentPair(
+    darkPrimary = Color(0xFF8EACBD),
+    darkContainer = Color(0xFF1A242C),
+    lightPrimary = Color(0xFF3A6070),
+    lightContainer = Color(0xFFD8E4EA),
+  ),
+  NovaAccent.SAGE to AccentPair(
+    darkPrimary = Color(0xFF9DB89A),
+    darkContainer = Color(0xFF1C261A),
+    lightPrimary = Color(0xFF3E6B3A),
+    lightContainer = Color(0xFFD6E5D3),
+  ),
+  NovaAccent.TERRACOTTA to AccentPair(
+    darkPrimary = Color(0xFFE08E7E),
+    darkContainer = Color(0xFF2C1A16),
+    lightPrimary = Color(0xFF9C3B2A),
+    lightContainer = Color(0xFFF0D5CE),
+  ),
+  NovaAccent.PLUM to AccentPair(
+    darkPrimary = Color(0xFFC4A0D0),
+    darkContainer = Color(0xFF241A2A),
+    lightPrimary = Color(0xFF6B4080),
+    lightContainer = Color(0xFFE4D4EC),
+  ),
 )
 
-private val NovaDarkScheme = darkColorScheme(
-  primary = Color(0xFFE2B26B),
-  onPrimary = Color(0xFF14110D),
-  primaryContainer = Color(0xFF2A2114),
-  onPrimaryContainer = Color(0xFFF3EDE1),
-  secondary = Color(0xFF9DB89A),
-  onSecondary = Color(0xFF14110D),
-  surface = Color(0xFF14110D),
-  onSurface = Color(0xFFF3EDE1),
-  onSurfaceVariant = Color(0xFFA79E8D),
-  surfaceVariant = Color(0xFF1D1A14),
-  surfaceContainer = Color(0xFF1D1A14),
-  surfaceContainerHigh = Color(0xFF26211A),
-  surfaceContainerLow = Color(0xFF181410),
-  outline = Color(0xFF2E2920),
-  outlineVariant = Color(0xFF26211A),
-  error = Color(0xFFE08E7E),
-  errorContainer = Color(0xFF3A1F18),
-)
+private fun buildNovaScheme(accent: NovaAccent, dark: Boolean): ColorScheme {
+  val a = accentMap[accent]!!
+
+  if (dark) {
+    return darkColorScheme(
+      primary = a.darkPrimary,
+      onPrimary = NovaPalette.DarkBg,
+      primaryContainer = a.darkContainer,
+      onPrimaryContainer = NovaPalette.InkDark,
+      secondary = Color(0xFF9DB89A),
+      onSecondary = NovaPalette.DarkBg,
+      surface = NovaPalette.DarkBg,
+      onSurface = NovaPalette.InkDark,
+      onSurfaceVariant = NovaPalette.InkDimDark,
+      surfaceVariant = NovaPalette.DarkSurface,
+      surfaceContainer = NovaPalette.DarkSurface,
+      surfaceContainerHigh = NovaPalette.DarkRaised,
+      surfaceContainerLow = Color(0xFF181410),
+      outline = NovaPalette.DarkLine,
+      outlineVariant = NovaPalette.DarkRaised,
+      error = NovaPalette.ClayDark,
+      errorContainer = Color(0xFF3A1F18),
+    )
+  } else {
+    return lightColorScheme(
+      primary = a.lightPrimary,
+      onPrimary = Color(0xFFFFFBF0),
+      primaryContainer = a.lightContainer,
+      onPrimaryContainer = NovaPalette.InkLight,
+      secondary = Color(0xFF3E6B3A),
+      onSecondary = Color.White,
+      surface = NovaPalette.LightBg,
+      onSurface = NovaPalette.InkLight,
+      onSurfaceVariant = NovaPalette.InkDimLight,
+      surfaceVariant = NovaPalette.LightSurface,
+      surfaceContainer = NovaPalette.LightSurface,
+      surfaceContainerHigh = NovaPalette.LightRaised,
+      outline = NovaPalette.LightLine,
+      outlineVariant = Color(0xFFE7DFCC),
+      error = NovaPalette.ClayLight,
+      errorContainer = Color(0xFFF5DCD4),
+    )
+  }
+}
 
 @Composable
-fun NovaTheme(content: @Composable () -> Unit) {
+fun NovaTheme(accent: NovaAccent = NovaAccent.BRONZE, content: @Composable () -> Unit) {
   val dark = isSystemInDarkTheme()
   MaterialTheme(
-    colorScheme = if (dark) NovaDarkScheme else NovaLightScheme,
+    colorScheme = buildNovaScheme(accent, dark),
     typography = Typography(
       displayLarge = Typography().displayLarge.copy(fontFamily = NovaDisplay, fontWeight = FontWeight.W600),
       displayMedium = Typography().displayMedium.copy(fontFamily = NovaDisplay, fontWeight = FontWeight.W600),

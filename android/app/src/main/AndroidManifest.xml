@@ -5,7 +5,7 @@
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.CAMERA" />
   <application android:label="Nova" android:theme="@style/Theme.Nova"
-    android:supportsRtl="true">
+    android:icon="@mipmap/ic_launcher" android:supportsRtl="true">
     <activity android:name=".MainActivity" android:exported="true"
       android:windowSoftInputMode="adjustResize">
       <intent-filter>

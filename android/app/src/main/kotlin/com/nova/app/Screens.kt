@@ -106,11 +106,12 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
   var loading by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
 
-  val ScreenBg = Color(0xFF0D0F14)
-  val CardBg = Color(0xFF1A1B23)
-  val AccentBlue = Color(0xFF3B82F6)
-  val TextWhite = Color(0xFFF9FAFB)
-  val TextGray = Color(0xFF9CA3AF)
+  val scheme = MaterialTheme.colorScheme
+  val ScreenBg = scheme.surface
+  val CardBg = scheme.surfaceVariant
+  val Accent = scheme.primary
+  val TextWhite = scheme.onSurface
+  val TextGray = scheme.onSurfaceVariant
 
   var appeared by remember { mutableStateOf(false) }
   LaunchedEffect(Unit) { appeared = true }
@@ -132,7 +133,7 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
           "Nova",
           style = MaterialTheme.typography.displayLarge,
           fontWeight = FontWeight.Black,
-          color = AccentBlue,
+          color = Accent,
         )
         Spacer(Modifier.height(4.dp))
         Text(
@@ -157,9 +158,9 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
         focusedContainerColor = CardBg,
         unfocusedTextColor = TextWhite,
         focusedTextColor = TextWhite,
-        cursorColor = AccentBlue,
-        unfocusedBorderColor = Color(0xFF2A2B35),
-        focusedBorderColor = AccentBlue,
+        cursorColor = Accent,
+        unfocusedBorderColor = scheme.outline,
+        focusedBorderColor = Accent,
       ),
     )
     Spacer(Modifier.height(14.dp))
@@ -176,15 +177,15 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
         focusedContainerColor = CardBg,
         unfocusedTextColor = TextWhite,
         focusedTextColor = TextWhite,
-        cursorColor = AccentBlue,
-        unfocusedBorderColor = Color(0xFF2A2B35),
-        focusedBorderColor = AccentBlue,
+        cursorColor = Accent,
+        unfocusedBorderColor = scheme.outline,
+        focusedBorderColor = Accent,
       ),
     )
     AnimatedVisibility(visible = error != null) {
       Text(
         error ?: "",
-        color = Color(0xFFF87171),
+        color = scheme.error,
         style = MaterialTheme.typography.bodySmall,
         modifier = Modifier.padding(top = 8.dp),
       )
@@ -205,16 +206,16 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
       },
       modifier = Modifier.fillMaxWidth().height(52.dp),
       shape = RoundedCornerShape(14.dp),
-      colors = ButtonDefaults.buttonColors(containerColor = AccentBlue),
+      colors = ButtonDefaults.buttonColors(containerColor = Accent),
     ) {
       if (loading) {
-        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp, color = Color.White)
+        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp, color = scheme.onPrimary)
       } else {
         Text(
           if (registering) "Create account" else "Sign in",
           style = MaterialTheme.typography.titleMedium,
           fontWeight = FontWeight.SemiBold,
-          color = Color.White,
+          color = scheme.onPrimary,
         )
       }
     }
@@ -522,10 +523,6 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   var cameraGranted by remember {
     mutableStateOf(context.checkSelfPermission(Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
   }
-  val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-    cameraGranted = granted
-    if (granted) launchCamera()
-  }
   DisposableEffect(Unit) { onDispose { voice.destroy() } }
   val tts = remember { VoiceOutput(context) }
   DisposableEffect(Unit) { onDispose { tts.shutdown() } }
@@ -548,6 +545,10 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     val file = java.io.File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
     cameraUri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
     cameraUri?.let { takePicture.launch(it) }
+  }
+  val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    cameraGranted = granted
+    if (granted) launchCamera()
   }
   var showAttachMenu by remember { mutableStateOf(false) }
 
@@ -1454,7 +1455,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   }
 }
 
-@Composable fun SettingsScreen(session: SessionToken, onLogout: () -> Unit, onBack: () -> Unit = {}) {
+@Composable fun SettingsScreen(session: SessionToken, onLogout: () -> Unit, onBack: () -> Unit = {}, onAccentChanged: () -> Unit = {}) {
   val context = LocalContext.current
   var granted by remember {
     mutableStateOf(
@@ -1541,6 +1542,68 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               Text("Nova voice, on tap of any answer", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
             }
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+          }
+        }
+      }
+    }
+
+    item {
+      Text("Accent", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+    }
+
+    item {
+      val currentAccentName = AccentPreferences.get(context)
+      val currentAccent = NovaAccent.entries.find { it.name.equals(currentAccentName, ignoreCase = true) } ?: NovaAccent.BRONZE
+      Surface(shape = RoundedCornerShape(22.dp), color = scheme.surfaceVariant, tonalElevation = 1.dp) {
+        Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+          Text("Choose a tone", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = scheme.onSurface)
+          Spacer(Modifier.height(14.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+          ) {
+            NovaAccent.entries.forEach { accent ->
+              val selected = accent == currentAccent
+              val previewDark = isSystemInDarkTheme()
+              val previewColor = remember(accent, previewDark) {
+                val pairs = mapOf(
+                  NovaAccent.BRONZE to (Color(0xFFE2B26B) to Color(0xFF7A5320)),
+                  NovaAccent.SLATE to (Color(0xFF8EACBD) to Color(0xFF3A6070)),
+                  NovaAccent.SAGE to (Color(0xFF9DB89A) to Color(0xFF3E6B3A)),
+                  NovaAccent.TERRACOTTA to (Color(0xFFE08E7E) to Color(0xFF9C3B2A)),
+                  NovaAccent.PLUM to (Color(0xFFC4A0D0) to Color(0xFF6B4080)),
+                )
+                if (previewDark) pairs[accent]!!.first else pairs[accent]!!.second
+              }
+              Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                  modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(previewColor)
+                    .clickable {
+                      AccentPreferences.set(context, accent.name)
+                      onAccentChanged()
+                    },
+                  contentAlignment = Alignment.Center,
+                ) {
+                  if (selected) {
+                    Surface(
+                      shape = CircleShape,
+                      color = Color.White.copy(alpha = 0.3f),
+                      modifier = Modifier.size(20.dp),
+                    ) {}
+                  }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                  accent.label,
+                  style = MaterialTheme.typography.labelSmall,
+                  fontFamily = NovaMono,
+                  color = if (selected) scheme.primary else scheme.onSurfaceVariant,
+                )
+              }
+            }
           }
         }
       }

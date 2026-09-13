@@ -30,3 +30,5 @@ emu-home/
 check-url.mjs
 check-sdk-req.mjs
 emu-tmp/
+.gradle-home/
+.gradle/
