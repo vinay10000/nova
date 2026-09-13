@@ -136,6 +136,7 @@ model Execution {
   output      String?
   error       String?
   steps       ExecutionStep[]
+  approvals   Approval[]
 }
 
 model ExecutionStep {
@@ -145,6 +146,22 @@ model ExecutionStep {
   label       String
   metadata    Json?
   createdAt   DateTime  @default(now())
+}
+
+// §36 human checkpoint: a suspended write/send waits here for approve/reject.
+// Resume-on-decision lands in Phase 5; Phase 3 records the decision honestly.
+model Approval {
+  id          String    @id @default(cuid())
+  userId      String
+  executionId String
+  execution   Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  toolId      String
+  payload     Json
+  status      String    @default("pending") // pending | approved | rejected
+  createdAt   DateTime  @default(now())
+  decidedAt   DateTime?
+
+  @@index([userId, status])
 }
 
 model Memory {

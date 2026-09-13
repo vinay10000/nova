@@ -32,6 +32,8 @@ export interface AIProvider {
       model?: string;
       tools?: ToolDef[];
       previousInteractionId?: string;
+      /** Turn 2+ of a tool loop: results fed back into the same interaction. */
+      functionResults?: { type: 'function_result'; name: string; call_id: string; result: string; is_error?: boolean }[];
       signal?: AbortSignal;
       /** §9: inline image/document parts attached to the last user message. */
       attachments?: InlinePart[];
@@ -39,6 +41,6 @@ export interface AIProvider {
       extractedText?: string;
     },
   ): AsyncGenerator<StreamChunk>; // §3, §6 must stream progressively
-  generateAgentConfig(naturalLanguage: string): Promise<unknown>; // §12-§14 conversational builder
+  generateAgentConfig(naturalLanguage: string, knownTools?: string[]): Promise<unknown>; // §12-§14 conversational builder
   titleFor(firstUserMessage: string): Promise<string>; // §8 auto-title
 }

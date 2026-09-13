@@ -46,7 +46,7 @@ paths:
     delete: { summary: Delete (§8), responses: { '200': { description: ok } } }
   /v1/chat/stream:
     post:
-      summary: Streaming chat (SSE) — §3 normal chat
+      summary: Streaming chat (SSE) — §3 normal chat, §10 attachments via attachmentIds
       requestBody:
         content:
           application/json:
@@ -57,15 +57,51 @@ paths:
                 conversationId: { type: string }
                 message: { type: string, maxLength: 32000 }
                 model: { type: string }
+                attachmentIds: { type: array, items: { type: string }, maxItems: 5 }
       responses: { '200': { description: text/event-stream } }
+  /v1/files:
+    post:
+      summary: Upload file (§10) — multipart, magic-byte sniff, 20MB cap; returns metadata only
+      responses: { '200': { description: stored file metadata }, '400': { description: empty_file|file_too_large|unsupported_type } }
+  /v1/files/{id}:
+    get: { summary: File metadata (§10 — binary stays server-side), responses: { '200': { description: ok }, '404': { description: not_found } } }
+  /v1/tts:
+    post:
+      summary: Text-to-speech (§11) — remote engine, returns audio/wav; device TTS is the fallback
+      responses: { '200': { description: audio/wav }, '503': { description: tts_unconfigured } }
   /v1/agents:
     get: { summary: List agents (§13), responses: { '200': { description: ok } } }
-    post: { summary: Create agent config (review before activate), responses: { '200': { description: ok } } }
+    post:
+      summary: Create agent config draft (§13 — review before activate; unknown tool id = 400)
+      responses: { '200': { description: ok }, '400': { description: invalid_input|unknown_tool } }
+  /v1/agents/build:
+    post:
+      summary: NL builder (§12/§59) — prompt -> agent config or {questions[]}
+      responses: { '200': { description: ok }, '429': { description: rate_limited retryable } }
+  /v1/agents/{id}:
+    get: { summary: Agent detail (§45), responses: { '200': { description: ok }, '404': { description: not_found } } }
+    patch: { summary: Edit config before activate (§13), responses: { '200': { description: ok } } }
+  /v1/agents/{id}/activate:
+    post: { summary: Activate agent, responses: { '200': { description: ok } } }
+  /v1/agents/{id}/pause:
+    post: { summary: Pause agent, responses: { '200': { description: ok } } }
   /v1/agents/{id}/run:
-    post: { summary: Run Now (§33), responses: { '200': { description: ok } } }
+    post:
+      summary: Run Now (§33) — inline execution, bounded; returns {executionId, status, output?}
+      responses: { '200': { description: ok }, '404': { description: not_found } }
+  /v1/tools:
+    get: { summary: Tool registry for the visual editor (§13), responses: { '200': { description: ok } } }
   /v1/executions:
-    get: { summary: Execution history (§34-§35), responses: { '200': { description: ok } } }
+    get: { summary: Execution history (§34-§35, ?agentId=), responses: { '200': { description: ok } } }
+  /v1/executions/{id}:
+    get: { summary: Execution detail with step timeline (§44), responses: { '200': { description: ok } } }
+  /v1/executions/{id}/cancel:
+    post: { summary: Cancel a queued/running/waiting execution, responses: { '200': { description: ok } } }
+  /v1/approvals:
+    get: { summary: Pending checkpoints (§36, ?status=), responses: { '200': { description: ok } } }
   /v1/approvals/{id}:
-    post: { summary: Approve/Reject human checkpoint (§36), responses: { '200': { description: ok } } }
+    post:
+      summary: Approve/Reject human checkpoint (§36; resume-on-decision is Phase 5)
+      responses: { '200': { description: ok } }
   /v1/connections:
     get: { summary: OAuth connections (§38), responses: { '200': { description: ok } } }

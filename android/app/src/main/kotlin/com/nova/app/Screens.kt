@@ -53,6 +53,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -540,18 +543,186 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
   }
 }
 
-@Composable fun AgentsScreen(onCreate: () -> Unit) {
-  // §12-§14 builder entry: natural language -> config card -> Edit/Activate. Agents feel like chat extension (§5,§42).
-  Column(Modifier.fillMaxSize().padding(16.dp)) {
-    Text("Agents", style = MaterialTheme.typography.headlineMedium)
-    Text("Describe what to automate. AI asks missing questions, then shows config for review.")
-    Spacer(Modifier.height(12.dp))
-    Button(onClick = onCreate) { Text("Create Agent") }
+@Composable fun AgentsScreen(api: NovaApi) {
+  // §12-§14 builder: natural language -> config card or questions -> Edit/Activate.
+  // §45 detail: status, Run Now, Pause. Agents feel like a chat extension (§5,§42).
+  val scope = rememberCoroutineScope()
+  var agents by remember { mutableStateOf<List<com.nova.app.data.AgentDto>>(emptyList()) }
+  var loading by remember { mutableStateOf(true) }
+  var error by remember { mutableStateOf<String?>(null) }
+  var nl by remember { mutableStateOf("") }
+  var building by remember { mutableStateOf(false) }
+  var built by remember { mutableStateOf<kotlinx.serialization.json.JsonObject?>(null) }
+  var selected by remember { mutableStateOf<com.nova.app.data.AgentDto?>(null) }
+  var runOutput by remember { mutableStateOf<String?>(null) }
+  var running by remember { mutableStateOf(false) }
+  var approvals by remember { mutableStateOf<List<com.nova.app.data.ApprovalDto>>(emptyList()) }
+
+  fun refresh() {
+    scope.launch {
+      loading = true; error = null
+      runCatching { api.agents() to api.approvals() }
+        .onSuccess { (a, ap) -> agents = a.agents; approvals = ap.approvals }
+        .onFailure { error = "Unable to load agents" }
+      loading = false
+    }
+  }
+  LaunchedEffect(Unit) { refresh() }
+
+  LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    item {
+      Text("Agents", style = MaterialTheme.typography.headlineMedium)
+      Text("Describe what to automate. AI asks missing questions, then shows config for review.")
+    }
+    item {
+      OutlinedTextField(nl, { nl = it }, label = { Text("e.g. brief me on Android news every morning") })
+      Spacer(Modifier.height(8.dp))
+      Button(enabled = nl.isNotBlank() && !building, onClick = {
+        scope.launch {
+          building = true; error = null; built = null
+          runCatching { api.buildAgent(com.nova.app.data.BuildAgentRequest(nl)) }
+            .onSuccess { built = it }
+            .onFailure { error = "Builder failed — check connection and retry" }
+          building = false
+        }
+      }) { Text(if (building) "Asking…" else "Build") }
+    }
+    built?.let { obj ->
+      item {
+        val questions = obj["questions"]?.let { runCatching { it.jsonArray.map { q -> q.jsonPrimitive.content } }.getOrNull() }
+        ElevatedCard(Modifier.fillMaxWidth()) {
+          Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (questions != null) {
+              Text("Needs a little more:")
+              questions.forEach { Text("• $it") }
+            } else {
+              Text(obj["name"]?.jsonPrimitive?.contentOrNull ?: "New agent", style = MaterialTheme.typography.titleMedium)
+              Text(obj["goal"]?.jsonPrimitive?.contentOrNull ?: "")
+              Text("Tools: " + (obj["tools"]?.jsonArray?.map { it.jsonPrimitive.content }?.joinToString() ?: "—"))
+              Button(onClick = {
+                scope.launch {
+                  error = null
+                  runCatching {
+                    api.createAgent(
+                      com.nova.app.data.CreateAgentRequest(
+                        name = obj["name"]!!.jsonPrimitive.content,
+                        goal = obj["goal"]!!.jsonPrimitive.content,
+                        instructions = obj["instructions"]?.jsonPrimitive?.contentOrNull ?: obj["goal"]!!.jsonPrimitive.content,
+                        tools = obj["tools"]!!.jsonArray.map { it.jsonPrimitive.content },
+                      ),
+                    )
+                  }.onSuccess { created ->
+                    built = null; nl = ""
+                    runCatching { api.activateAgent(created.id) }
+                    refresh()
+                  }.onFailure { error = "Save failed — the builder may have named a tool that does not exist yet" }
+                }
+              }) { Text("Save & Activate") }
+            }
+          }
+        }
+      }
+    }
+    if (approvals.isNotEmpty()) {
+      item {
+        ElevatedCard(Modifier.fillMaxWidth()) {
+          Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Waiting for approval", style = MaterialTheme.typography.titleMedium)
+            approvals.forEach { ap ->
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("${ap.toolId}", Modifier.weight(1f))
+                TextButton(onClick = {
+                  scope.launch {
+                    runCatching { api.decideApproval(ap.id, com.nova.app.data.DecideApprovalRequest("reject")) }
+                    refresh()
+                  }
+                }) { Text("Reject") }
+                TextButton(onClick = {
+                  scope.launch {
+                    runCatching { api.decideApproval(ap.id, com.nova.app.data.DecideApprovalRequest("approve")) }
+                    refresh()
+                  }
+                }) { Text("Approve") }
+              }
+            }
+          }
+        }
+      }
+    }
+    if (loading) { item { LinearProgressIndicator(Modifier.fillMaxWidth()) } }
+    error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
+    items(agents.size) { i ->
+      val a = agents[i]
+      ElevatedCard(Modifier.fillMaxWidth().clickable {
+        selected = if (selected?.id == a.id) null else a; runOutput = null
+        scope.launch { runCatching { api.agent(a.id) }.onSuccess { selected = it } }
+      }) {
+        Column(Modifier.padding(12.dp)) {
+          Text(a.name, style = MaterialTheme.typography.titleMedium)
+          Text("${a.status} • ${(a.tools).joinToString()}")
+          if (selected?.id == a.id) {
+            selected?.let { d ->
+              Text(d.goal)
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (d.status != "active") TextButton(onClick = {
+                  scope.launch { runCatching { api.activateAgent(d.id) }; refresh() }
+                }) { Text("Activate") }
+                if (d.status == "active") TextButton(onClick = {
+                  scope.launch { runCatching { api.pauseAgent(d.id) }; refresh() }
+                }) { Text("Pause") }
+                Button(enabled = !running, onClick = {
+                  scope.launch {
+                    running = true; runOutput = null
+                    runCatching { api.runAgent(d.id) }
+                      .onSuccess { runOutput = "[${it.status}] ${it.output ?: ""}" }
+                      .onFailure { runOutput = "[failed] run failed — retry shortly" }
+                    running = false; refresh()
+                  }
+                }) { Text(if (running) "Running…" else "Run Now") }
+              }
+              runOutput?.let { Text(it) }
+            }
+          }
+        }
+      }
+    }
   }
 }
-@Composable fun ActivityScreen() {
-  // §44 Today list -> execution details (§34-§35).
-  Column(Modifier.fillMaxSize().padding(16.dp)) { Text("Activity", style = MaterialTheme.typography.headlineMedium); Text("TODO: executions SSE/poll.") }
+
+@Composable fun ActivityScreen(api: NovaApi) {
+  // §44 execution list -> detail with the §35 step timeline.
+  val scope = rememberCoroutineScope()
+  var executions by remember { mutableStateOf<List<com.nova.app.data.ExecutionDto>>(emptyList()) }
+  var loading by remember { mutableStateOf(true) }
+  var error by remember { mutableStateOf<String?>(null) }
+  var detail by remember { mutableStateOf<com.nova.app.data.ExecutionDto?>(null) }
+  LaunchedEffect(Unit) {
+    runCatching { api.executions() }
+      .onSuccess { executions = it.executions }
+      .onFailure { error = "Unable to load activity" }
+    loading = false
+  }
+  LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    item { Text("Activity", style = MaterialTheme.typography.headlineMedium) }
+    if (loading) { item { LinearProgressIndicator(Modifier.fillMaxWidth()) } }
+    error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
+    items(executions.size) { i ->
+      val e = executions[i]
+      ElevatedCard(Modifier.fillMaxWidth().clickable {
+        detail = if (detail?.id == e.id) null else e
+        scope.launch { runCatching { api.execution(e.id) }.onSuccess { detail = it } }
+      }) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+          Text((e.agent?.name ?: "Agent") + " • " + e.status, style = MaterialTheme.typography.titleSmall)
+          if (detail?.id == e.id) {
+            detail?.steps?.forEach { Text("• ${it.label}") }
+            detail?.output?.let { Text(it) }
+            detail?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+          }
+        }
+      }
+    }
+  }
 }
 @Composable fun ConnectionsScreen() {
   // §38 connect/reauthorize/disconnect + inspect scopes. Tokens stay backend-encrypted.

@@ -106,6 +106,43 @@ interface NovaApi {
   @retrofit2.http.Multipart
   @retrofit2.http.POST("/v1/files")
   suspend fun uploadFile(@retrofit2.http.Part file: okhttp3.MultipartBody.Part): FileDto
+
+  // §52 agent framework.
+  @retrofit2.http.GET("/v1/agents")
+  suspend fun agents(): AgentsResponse
+
+  @retrofit2.http.POST("/v1/agents/build")
+  suspend fun buildAgent(@retrofit2.http.Body body: BuildAgentRequest): kotlinx.serialization.json.JsonObject
+
+  @retrofit2.http.POST("/v1/agents")
+  suspend fun createAgent(@retrofit2.http.Body body: CreateAgentRequest): AgentDto
+
+  @retrofit2.http.GET("/v1/agents/{id}")
+  suspend fun agent(@retrofit2.http.Path("id") id: String): AgentDto
+
+  @retrofit2.http.POST("/v1/agents/{id}/activate")
+  suspend fun activateAgent(@retrofit2.http.Path("id") id: String): OkResponse
+
+  @retrofit2.http.POST("/v1/agents/{id}/pause")
+  suspend fun pauseAgent(@retrofit2.http.Path("id") id: String): OkResponse
+
+  @retrofit2.http.POST("/v1/agents/{id}/run")
+  suspend fun runAgent(@retrofit2.http.Path("id") id: String): RunAgentResponse
+
+  @retrofit2.http.GET("/v1/executions")
+  suspend fun executions(): ExecutionsResponse
+
+  @retrofit2.http.GET("/v1/executions/{id}")
+  suspend fun execution(@retrofit2.http.Path("id") id: String): ExecutionDto
+
+  @retrofit2.http.GET("/v1/approvals")
+  suspend fun approvals(@retrofit2.http.Query("status") status: String = "pending"): ApprovalsResponse
+
+  @retrofit2.http.POST("/v1/approvals/{id}")
+  suspend fun decideApproval(
+    @retrofit2.http.Path("id") id: String,
+    @retrofit2.http.Body body: DecideApprovalRequest,
+  ): OkResponse
 }
 
 // Mirrors backend StoredFile (metadata only — bytes stay server-side, §46).
@@ -123,3 +160,41 @@ interface NovaApi {
   val title: String,
   val messages: List<MessageDto> = emptyList(),
 )
+
+// §52 agent DTOs. Build returns either a config or {questions[]} — kept as
+// JsonObject so a model-shape drift shows as UI text, never a crash.
+@Serializable data class OkResponse(val ok: Boolean = true)
+@Serializable data class BuildAgentRequest(val prompt: String)
+@Serializable data class CreateAgentRequest(
+  val name: String,
+  val goal: String,
+  val instructions: String,
+  val tools: List<String>,
+  val description: String? = null,
+)
+@Serializable data class AgentDto(
+  val id: String,
+  val name: String,
+  val goal: String,
+  val instructions: String = "",
+  val tools: List<String> = emptyList(),
+  val permissions: List<String> = emptyList(),
+  val status: String = "draft",
+)
+@Serializable data class AgentsResponse(val agents: List<AgentDto> = emptyList())
+@Serializable data class RunAgentResponse(val executionId: String, val status: String, val output: String? = null)
+@Serializable data class StepDto(val id: String = "", val label: String)
+@Serializable data class ExecutionDto(
+  val id: String,
+  val status: String,
+  val trigger: String = "",
+  val output: String? = null,
+  val error: String? = null,
+  val steps: List<StepDto> = emptyList(),
+  val agent: AgentNameDto? = null,
+)
+@Serializable data class AgentNameDto(val name: String = "")
+@Serializable data class ExecutionsResponse(val executions: List<ExecutionDto> = emptyList())
+@Serializable data class ApprovalDto(val id: String, val toolId: String, val status: String = "pending")
+@Serializable data class ApprovalsResponse(val approvals: List<ApprovalDto> = emptyList())
+@Serializable data class DecideApprovalRequest(val decision: String) // approve | reject

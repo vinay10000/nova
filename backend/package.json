@@ -8,7 +8,7 @@
     "postinstall": "prisma generate",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node --env-file-if-exists=.env dist/index.js",
-    "test": "tsx src/tools/Tool.test.ts && tsx src/auth.test.ts && tsx src/services/fileService.test.ts"
+    "test": "tsx src/tools/Tool.test.ts && tsx src/auth.test.ts && tsx src/services/fileService.test.ts && tsx src/agent/runtime.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",

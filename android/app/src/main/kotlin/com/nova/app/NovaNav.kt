@@ -35,8 +35,8 @@ fun NovaNav(session: SessionToken) {
   ) { pad ->
     NavHost(nav, startDestination = "chat", Modifier.padding(pad)) {
       composable("chat") { ChatScreen(api, session) }
-      composable("agents") { AgentsScreen(onCreate = { nav.navigate("chat") }) }
-      composable("activity") { ActivityScreen() }
+      composable("agents") { AgentsScreen(api) }
+      composable("activity") { ActivityScreen(api) }
       composable("connections") { ConnectionsScreen() }
       composable("settings") { SettingsScreen() }
     }

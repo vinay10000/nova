@@ -22,7 +22,10 @@ export class GeminiProvider implements AIProvider {
   /**
    * Verified Interactions API shape: `create()` takes `input` always; turn 1 passes the
    * text, follow-ups pass `function_result` steps plus `previous_interaction_id`.
-   * Streaming emits `step.delta` events carrying `TextDelta { type:'text', text }`.
+   * Streaming emits `step.delta` text events, `step.start` function_call (arguments
+   * EMPTY — real args stream later as `arguments_delta` chunks, flushed at `step.stop`),
+   * and turns needing action close with NO `interaction.completed`, so the turn end
+   * is detected by stream close with the id from `interaction.created`.
    */
   async *streamChat(
     messages: ChatMessage[],
@@ -54,38 +57,93 @@ export class GeminiProvider implements AIProvider {
       stream: true,
     } as Parameters<typeof this.client.interactions.create>[0])) as AsyncIterable<{
       event_type: string;
-      delta?: { type: string; text: string };
+      index?: number;
+      delta?: { type: string; text?: string; arguments?: string };
       step?: { type: string; name?: string; id?: string; arguments?: unknown };
       interaction?: { id?: string };
+      interaction_id?: string;
     }>;
+
+    // function_call args stream as arguments_delta chunks AFTER step.start carries
+    // empty arguments — buffer per step index, emit the call at step.stop.
+    let pending: { index?: number; id: string; name: string; argsText: string } | null = null;
+    let interactionId: string | undefined;
+    let sawDone = false;
+    const flush = function* (): Generator<StreamChunk> {
+      if (pending) {
+        let args: unknown = {};
+        try { args = pending.argsText ? JSON.parse(pending.argsText) : {}; } catch { args = {}; }
+        const call = { type: 'tool_call' as const, toolId: pending.name, callId: pending.id, args };
+        pending = null;
+        yield call;
+      }
+    };
 
     for await (const event of stream) {
       if (opts?.signal?.aborted) break;
-      if (event.event_type === 'step.delta' && event.delta?.type === 'text') {
+      // Stream-level failures (e.g. quota) arrive as EVENTS on stream:true, not
+      // HTTP errors — surfacing them as throws is what lets callers fall back.
+      // Seen in the wild: silent empty streams exactly when quota was exhausted.
+      const evt = event as { event_type: string; error?: unknown; message?: unknown };
+      if (evt.event_type === 'error' || evt.event_type === 'interaction.failed' || evt.error) {
+        throw new Error(`gemini_stream_error: ${JSON.stringify(evt.error ?? evt.message ?? evt).slice(0, 300)}`);
+      }
+      interactionId = event.interaction?.id ?? event.interaction_id ?? interactionId;
+      if (event.event_type === 'step.delta' && (event.delta?.type === 'text' || event.delta?.type === 'text_delta') && event.delta.text) {
         yield { type: 'token', text: event.delta.text };
       }
-      // step.start carries a complete function_call step (name/arguments/call_id).
+      // step.start carries a function_call step with EMPTY arguments; the real
+      // args arrive as arguments_delta chunks on the same index.
       if (event.event_type === 'step.start' && event.step?.type === 'function_call' && event.step.name) {
+        yield* flush();
         // Verified: FunctionCallStep exposes `id` (used as call_id on the matching function_result).
-        yield { type: 'tool_call', toolId: event.step.name, callId: event.step.id, args: event.step.arguments };
+        pending = { index: event.index, id: event.step.id ?? `${Date.now()}`, name: event.step.name, argsText: '' };
+      }
+      if (event.event_type === 'step.delta' && event.delta?.type === 'arguments_delta' && event.delta.arguments) {
+        if (pending && (event.index === undefined || event.index === pending.index)) pending.argsText += event.delta.arguments;
+      }
+      if (event.event_type === 'step.stop') {
+        yield* flush();
       }
       if (event.event_type === 'interaction.completed') {
-        yield { type: 'done', interactionId: event.interaction?.id };
+        sawDone = true;
+        yield* flush();
+        yield { type: 'done', interactionId: event.interaction?.id ?? interactionId };
       }
+    }
+    // Turns needing action (requires_action) close the stream with no completed
+    // event — the turn is still done; the runtime continues via functionResults.
+    yield* flush();
+    if (!sawDone) {
+      // A stream with zero usable content and zero interaction id is an anomaly
+      // (e.g. an unrecognized error shape) — fail loudly, never silently empty.
+      if (!interactionId) throw new Error('empty_stream_response');
+      yield { type: 'done', interactionId };
     }
   }
 
-  async generateAgentConfig(naturalLanguage: string): Promise<unknown> {
+  async generateAgentConfig(naturalLanguage: string, knownTools?: string[]): Promise<unknown> {
     // §12-§14: goal/tools/permissions/schedule, plus questions[] when input is incomplete.
-    const res = await this.client.interactions.create({
-      model: MODELS.reasoning,
-      input:
-        'Convert the request into an agent configuration matching shared/agent-config.schema.json. ' +
-        'If goal, tools, schedule, or output is unclear, return {"questions":[...]} instead. ' +
-        `Request: ${naturalLanguage}`,
-      response_format: { type: 'text', mime_type: 'application/json' },
-    });
-    return parseJson(outputText(res), { error: 'unparseable' });
+    // One fallback to the cheap model on quota exhaustion (per-model free-tier limits).
+    // The allowed tool ids are named so the model cannot invent tool names (§15).
+    const prompt =
+      'Convert the request into an agent configuration matching shared/agent-config.schema.json. ' +
+      `The tools array may ONLY contain these ids: ${JSON.stringify(knownTools ?? [])}. ` +
+      'If goal, tools, schedule, or output is unclear, return {"questions":[...]} instead. ' +
+      `Request: ${naturalLanguage}`;
+    for (const model of [MODELS.chat, MODELS.cheap]) {
+      try {
+        const res = await this.client.interactions.create({
+          model,
+          input: prompt,
+          response_format: { type: 'text', mime_type: 'application/json' },
+        });
+        return parseJson(outputText(res), { error: 'unparseable' });
+      } catch (err) {
+        if (model === MODELS.cheap || !(err instanceof Error && /429|quota|rate/i.test(err.message))) throw err;
+      }
+    }
+    throw new Error('unreachable');
   }
 
   async titleFor(firstUserMessage: string): Promise<string> {
