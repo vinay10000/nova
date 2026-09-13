@@ -1,0 +1,86 @@
+package com.nova.app.voice
+
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import java.util.Locale
+
+/**
+ * §11 — voice is a modular capability, independent from the chat implementation.
+ * Both directions sit behind interfaces so the engine (on-device vs Gemini TTS/transcribe)
+ * is swappable without touching ChatViewModel.
+ */
+
+/** Speech -> text. Android stdlib SpeechRecognizer; on-device preferred, cloud fallback is the platform's own path. */
+interface VoiceInput {
+  val available: Boolean
+  fun start()
+  fun stop()
+}
+
+class AndroidVoiceInput(context: Context, private val onText: (String) -> Unit) : VoiceInput {
+  private val recognizer: SpeechRecognizer? =
+    if (SpeechRecognizer.isRecognitionAvailable(context)) SpeechRecognizer.createSpeechRecognizer(context) else null
+
+  override val available: Boolean get() = recognizer != null
+
+  override fun start() {
+    val r = recognizer ?: return
+    r.setRecognitionListener(object : RecognitionListener {
+      override fun onResults(results: Bundle) {
+        results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let(onText)
+      }
+      // Errors surface as absence of text; the mic button simply stops. No fake transcript (§61).
+      override fun onError(error: Int) = Unit
+      override fun onPartialResults(partialResults: Bundle) = Unit
+      override fun onReadyForSpeech(params: Bundle?) = Unit
+      override fun onBeginningOfSpeech() = Unit
+      override fun onRmsChanged(rmsdB: Float) = Unit
+      override fun onBufferReceived(buffer: ByteArray?) = Unit
+      override fun onEndOfSpeech() = Unit
+      override fun onEvent(eventType: Int, params: Bundle?) = Unit
+    })
+    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+      putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true) // §11: on-device first
+    }
+    r.startListening(intent)
+  }
+
+  override fun stop() {
+    recognizer?.stopListening()
+  }
+
+  fun destroy() {
+    recognizer?.destroy()
+  }
+}
+
+/** Text -> audio. Android stdlib TTS; Gemini TTS swaps in behind this same interface later. */
+class VoiceOutput(context: Context) {
+  private var tts: TextToSpeech? = null
+  private var ready = false
+
+  init {
+    tts = TextToSpeech(context) { status ->
+      ready = status == TextToSpeech.SUCCESS
+      if (ready) tts?.language = Locale.getDefault()
+    }
+  }
+
+  fun speak(text: String) {
+    if (ready) tts?.speak(text.take(2000), TextToSpeech.QUEUE_FLUSH, null, null)
+  }
+
+  fun stop() {
+    tts?.stop()
+  }
+
+  fun shutdown() {
+    tts?.shutdown()
+  }
+}

@@ -47,13 +47,21 @@ model Message {
 }
 
 model Attachment {
-  id        String  @id @default(cuid())
-  messageId String
-  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  filename  String
-  mime      String
-  size      Int
-  url       String
+  id            String   @id @default(cuid())
+  messageId     String?
+  message       Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId        String
+  filename      String
+  mime          String
+  size          Int
+  url           String
+  data          Bytes?
+  sha256        String?
+  extractedText String?
+  status        String   @default("ready")
+  createdAt     DateTime @default(now())
+
+  @@index([userId, createdAt])
 }
 
 model Agent {

@@ -56,7 +56,7 @@ Nova/
 
 ## 3. Key flows (§3,§32)
 
-- Chat: `Android -> POST /v1/chat/stream -> chatService -> GeminiProvider.streamChat -> SSE chunks -> Android append`
+- Chat: `Android -> POST /v1/chat/stream -> chatService -> GeminiProvider.streamChat (Interactions API, stream:true) -> SSE chunks -> Android append`. `previous_interaction_id` chaining ready for tool loops.
 - Agent: `Schedule -> JobQueue -> agentService.executeAgent -> Gemini function-call loop -> runToolWithSafety (validate→permission→auth→approval?→execute) -> Execution + steps -> notification`
 - Agent creation (§59): `NL -> AI detects goal/tools/permissions/schedule -> asks missing -> generates JSON (schema) -> user Edit/Activate`
 
@@ -80,5 +80,5 @@ Nova/
 ## 6. MVP status (Phases §50-§56)
 
 - [x] Phase 0 boilerplate (this tree)
-- [ ] Phase 1 ChatGPT Core: auth, SSE streaming, conversations CRUD/search/archive, markdown+code, new chat/history
-- [ ] Phase 2 files+multimodal+voice | Phase 3 agent framework | Phase 4 GitHub/Gmail/Calendar/Slack/Notion | Phase 5 schedules/approvals/notifs | Phase 6 browser | Phase 7 memory/multi-agent/HITL
+- [x] Phase 1 ChatGPT Core: auth (scrypt+JWT), SSE streaming via Gemini Interactions, conversations CRUD/search/archive, auto-title, markdown+code, model selector, edit/share/regenerate/stop — live probe green (a0e9ec9)
+- [x] Phase 2 files+multimodal+voice: /v1/files (magic-byte sniff, 20MB cap, Neon bytea), DOCX/PDF/CSV/TXT/images, inline parts + extracted text to Gemini Interactions, voice module (SpeechRecognizer + Android TTS, swappable), in-context mic/notification permissions — live probe green (vision/PDF/DOCX/CSV all answered by real Gemini)

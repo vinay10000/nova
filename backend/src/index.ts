@@ -1,11 +1,14 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import { z } from 'zod';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { GeminiProvider, MODELS } from './ai/GeminiProvider.js';
 import { ConversationNotFoundError, createChatService } from './services/chatService.js';
 import { prismaChatStore } from './services/prismaChatStore.js';
+import { prismaAttachmentSource } from './services/prismaAttachmentSource.js';
+import { createFileService, MAX_FILE_BYTES } from './services/fileService.js';
 import { hashPassword, issueToken, requireUser, verifyPassword } from './auth.js';
 
 const app = Fastify({ logger: true });
@@ -30,7 +33,9 @@ if (!process.env.GEMINI_API_KEY) {
 // Prisma 7 requires a driver adapter; pg connects directly to Postgres.
 const db = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) });
 const ai = new GeminiProvider();
-const chat = createChatService(ai, prismaChatStore(db));
+const chat = createChatService(ai, prismaChatStore(db), prismaAttachmentSource(db));
+const files = createFileService(db);
+await app.register(multipart, { limits: { fileSize: MAX_FILE_BYTES } });
 
 app.get('/health', async () => ({ ok: true }));
 
@@ -140,12 +145,42 @@ app.delete('/v1/conversations/:id', async (req, reply) => {
   return { ok: true };
 });
 
+// ---- §10 files: upload -> validate (magic bytes) -> store -> extract --------
+
+app.post('/v1/files', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return;
+  if (!req.isMultipart()) return reply.code(400).send({ error: 'multipart_required' });
+  const part = await req.file();
+  if (!part) return reply.code(400).send({ error: 'file_missing' });
+  const buf = await part.toBuffer();
+  try {
+    const stored = await files.store(userId, part.filename, part.mimetype, buf);
+    return stored;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'upload_failed';
+    const code = ['empty_file', 'file_too_large', 'unsupported_type'].includes(reason) ? reason : 'upload_failed';
+    return reply.code(400).send({ error: code });
+  }
+});
+
+app.get('/v1/files/:id', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return;
+  const { id } = req.params as { id: string };
+  const att = await files.get(userId, id);
+  // Metadata only — the binary stays out of JSON responses; inline data flows to Gemini server-side.
+  if (!att) return reply.code(404).send({ error: 'not_found' });
+  return { id: att.id, filename: att.filename, mime: att.mime, size: att.size, status: att.status, url: att.url };
+});
+
 // ---- §3/§6 streaming chat (SSE) ---------------------------------------------
 
 const streamBody = z.object({
   conversationId: z.string().min(1),
   message: z.string().min(1).max(32_000),
   model: z.string().optional(),
+  attachmentIds: z.array(z.string().min(1)).max(5).optional(), // §10
 });
 
 app.post('/v1/chat/stream', async (req, reply) => {
@@ -153,7 +188,7 @@ app.post('/v1/chat/stream', async (req, reply) => {
   if (!userId) return reply;
   const parsed = streamBody.safeParse(req.body);
   if (!parsed.success) return reply.code(400).send({ error: 'invalid_input' });
-  const { conversationId, message, model } = parsed.data;
+  const { conversationId, message, model, attachmentIds } = parsed.data;
 
   // Ownership validated BEFORE headers: a foreign/missing conversation is HTTP 404,
   // not an SSE error event after HTTP 200.
@@ -177,7 +212,7 @@ app.post('/v1/chat/stream', async (req, reply) => {
   req.raw.on('close', () => ac.abort());
 
   try {
-    for await (const chunk of chat.stream({ conversationId, userId, message, model, signal: ac.signal })) {
+    for await (const chunk of chat.stream({ conversationId, userId, message, model, attachmentIds, signal: ac.signal })) {
       if (ac.signal.aborted) break;
       send(chunk);
     }
@@ -214,9 +249,15 @@ app.get('/v1/executions', async (req, reply) => {
 });
 
 const port = Number(process.env.PORT ?? 3000);
-try {
-  await app.listen({ port, host: '0.0.0.0' });
-} catch (err) {
-  app.log.error(err);
-  process.exit(1);
+// On Vercel the Fastify instance is driven by the serverless handler in api/index.js;
+// binding a port there would hang the lambda.
+if (!process.env.VERCEL) {
+  try {
+    await app.listen({ port, host: '0.0.0.0' });
+  } catch (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
 }
+
+export { app };

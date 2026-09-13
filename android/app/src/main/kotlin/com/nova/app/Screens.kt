@@ -1,16 +1,27 @@
 package com.nova.app
 
+import android.Manifest
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Attachment
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -33,12 +44,22 @@ import com.nova.app.data.LoginRequest
 import com.nova.app.data.ModelDto
 import com.nova.app.data.NovaApi
 import com.nova.app.data.SessionToken
+import com.nova.app.voice.AndroidVoiceInput
+import com.nova.app.voice.VoiceOutput
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
+
+/** §10 display name of a picked document. */
+private fun queryDisplayName(cr: android.content.ContentResolver, uri: Uri): String? =
+  cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+    if (c.moveToFirst()) c.getString(0) else null
+  }
 
 @Composable
 fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
@@ -94,6 +115,44 @@ class ChatViewModel(
 
   private var job: Job? = null
   private var lastUserText: String? = null
+  private var uploadApi: NovaApi? = null // set via configureApi(); uploads go through the same authenticated client
+
+  // §10 attachments pending on the next message. Ids are backend-issued; nothing is trusted client-side.
+  data class PendingAttachment(val id: String, val filename: String, val size: Long)
+  private val _pending = MutableStateFlow<List<PendingAttachment>>(emptyList())
+  val pending: StateFlow<List<PendingAttachment>> = _pending.asStateFlow()
+  private val _uploading = MutableStateFlow(false)
+  val uploading: StateFlow<Boolean> = _uploading.asStateFlow()
+
+  fun configureApi(api: NovaApi) { uploadApi = api }
+
+  /** §10: upload a picked content:// uri, then hold its backend id for the next send. */
+  fun addAttachment(context: android.content.Context, uri: android.net.Uri) {
+    if (_uploading.value || _streaming.value) return
+    val api = uploadApi ?: return
+    viewModelScope.launch {
+      _uploading.value = true
+      _error.value = null
+      runCatching {
+        val cr = context.contentResolver
+        // Cheap pre-check; the backend re-validates (trust boundary stays server-side).
+        val size = cr.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+        if (size > 20L * 1024 * 1024) throw IllegalStateException("file_too_large")
+        val bytes = cr.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("unreadable")
+        val name = queryDisplayName(cr, uri) ?: "attachment"
+        val mime = cr.getType(uri) ?: "application/octet-stream"
+        val body = bytes.toRequestBody(mime.toMediaTypeOrNull())
+        api.uploadFile(okhttp3.MultipartBody.Part.createFormData("file", name, body))
+      }.onSuccess { dto ->
+        _pending.value = _pending.value + PendingAttachment(dto.id, dto.filename, dto.size)
+      }.onFailure { _error.value = "upload_failed" }
+      _uploading.value = false
+    }
+  }
+
+  fun removeAttachment(id: String) {
+    _pending.value = _pending.value.filter { it.id != id }
+  }
 
   fun send(text: String) {
     if (text.isBlank() || _streaming.value) return
@@ -102,6 +161,8 @@ class ChatViewModel(
       return
     }
     lastUserText = text
+    val attachmentIds = _pending.value.map { it.id } // consumed once, then cleared
+    _pending.value = emptyList()
 
     _messages.value += Message(role = "user", content = text)
     // Placeholder assistant row that tokens append into — gives live progress (§6).
@@ -110,7 +171,7 @@ class ChatViewModel(
     _streaming.value = true
 
     job = viewModelScope.launch {
-      client.stream(cid, text, model)
+      client.stream(cid, text, model, attachmentIds)
         .catch { _error.value = it.message ?: "stream_failed" }
         .collect { chunk ->
           when (chunk.type) {
@@ -183,6 +244,7 @@ class ChatViewModel(
     stop()
     conversationId = id
     _messages.value = history
+    _pending.value = emptyList()
   }
 
   fun clearError() { _error.value = null }
@@ -214,6 +276,7 @@ fun MarkdownBody(content: String, streaming: Boolean) {
 @Composable
 fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewModel()) {
   LaunchedEffect(session) { vm.configureSession(session) }
+  LaunchedEffect(api) { vm.configureApi(api) } // §10 uploads
   var conversations by remember { mutableStateOf<List<ConversationDto>>(emptyList()) }
   var models by remember { mutableStateOf<List<ModelDto>>(emptyList()) }
   var model by remember { mutableStateOf<String?>(null) }
@@ -245,10 +308,30 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
   val messages by vm.messages.collectAsState()
   val streaming by vm.streaming.collectAsState()
   val error by vm.error.collectAsState()
+  val pending by vm.pending.collectAsState()
+  val uploading by vm.uploading.collectAsState()
   var input by remember { mutableStateOf("") }
   val listState = rememberLazyListState()
   val scope = rememberCoroutineScope()
   val drawerState = rememberDrawerState(DrawerValue.Closed)
+
+  // §11 voice — modular engine wired here, never inside ChatViewModel.
+  val voice = remember { AndroidVoiceInput(context) { input = it } }
+  var micGranted by remember {
+    mutableStateOf(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+  }
+  val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    micGranted = granted
+    if (granted) voice.start()
+  }
+  DisposableEffect(Unit) { onDispose { voice.destroy() } }
+  val tts = remember { VoiceOutput(context) }
+  DisposableEffect(Unit) { onDispose { tts.shutdown() } }
+
+  // §10 one picker for both images and documents — the backend sniffs the real type.
+  val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+    uri?.let { vm.addAttachment(context, it) }
+  }
 
   // Follow the newest token as it streams in.
   LaunchedEffect(messages.size, messages.lastOrNull()?.content?.length) {
@@ -357,6 +440,10 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
                   IconButton(onClick = { clipboard.setText(AnnotatedString(m.content)) }) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "Copy message")
                   }
+                  // §11 output: read the response aloud (swappable VoiceOutput).
+                  IconButton(onClick = { tts.speak(m.content) }) {
+                    Icon(Icons.Default.VolumeUp, contentDescription = "Read aloud")
+                  }
                   // §6 share response.
                   IconButton(onClick = {
                     val send = Intent(Intent.ACTION_SEND).apply {
@@ -397,8 +484,35 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
 
     if (streaming) LinearProgressIndicator(Modifier.fillMaxWidth())
 
+    // §10 pending attachments — tap a chip to remove it.
+    if (pending.isNotEmpty() || uploading) {
+      Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
+        if (uploading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+        pending.forEach { p ->
+          AssistChip(
+            onClick = { vm.removeAttachment(p.id) },
+            label = { Text(p.filename, maxLines = 1) },
+            modifier = Modifier.padding(horizontal = 4.dp),
+          )
+        }
+      }
+    }
+
     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
-      // §7 input: text + send/stop; attachments and voice arrive with Phase 2.
+      // §7 input: text, attachments (§10), voice (§11), send/stop, model selector above.
+      IconButton(onClick = { pickFile.launch("*/*") }, enabled = !uploading && !streaming) {
+        Icon(Icons.Default.Attachment, contentDescription = "Attach file")
+      }
+      if (micGranted && voice.available) {
+        IconButton(onClick = { voice.start() }) {
+          Icon(Icons.Default.Mic, contentDescription = "Voice input")
+        }
+      } else {
+        // §43/§11: mic permission requested in context — when the user reaches for the mic.
+        IconButton(onClick = { micPermission.launch(Manifest.permission.RECORD_AUDIO) }) {
+          Icon(Icons.Default.Mic, contentDescription = "Enable voice input")
+        }
+      }
       OutlinedTextField(
         value = input,
         onValueChange = { input = it },
@@ -438,6 +552,39 @@ fun ChatScreen(api: NovaApi, session: SessionToken, vm: ChatViewModel = viewMode
   Column(Modifier.fillMaxSize().padding(16.dp)) { Text("Connections", style = MaterialTheme.typography.headlineMedium); Text("GitHub/Gmail/Slack/Notion/X/WhatsApp — TODO OAuth via backend.") }
 }
 @Composable fun SettingsScreen() {
-  // Notifications prefs (§43), memory view/edit/delete (§39), model selection (§7).
-  Column(Modifier.fillMaxSize().padding(16.dp)) { Text("Settings", style = MaterialTheme.typography.headlineMedium); Text("TODO: notifications, memory, model.") }
+  // §43: notifications permission is requested HERE, in context of the user asking for
+  // notifications — never at first launch.
+  val context = LocalContext.current
+  var granted by remember {
+    mutableStateOf(
+      if (Build.VERSION.SDK_INT >= 33)
+        context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+      else true,
+    )
+  }
+  val request = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
+  Column(Modifier.fillMaxSize().padding(16.dp)) {
+    Text("Settings", style = MaterialTheme.typography.headlineMedium)
+    Spacer(Modifier.height(12.dp))
+    if (Build.VERSION.SDK_INT >= 33) {
+      ListItem(
+        headlineContent = { Text("Agent notifications") },
+        supportingContent = { Text(if (granted) "Allowed" else "Off — you will not hear about agent runs") },
+        trailingContent = {
+          Switch(
+            checked = granted,
+            onCheckedChange = { on ->
+              if (on) request.launch(Manifest.permission.POST_NOTIFICATIONS)
+              else context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+              })
+            },
+          )
+        },
+      )
+    } else {
+      Text("Notifications follow the system setting (Android < 13).")
+    }
+    // §39 memory view/edit/delete and §12 builder prefs land with Phases 3+.
+  }
 }

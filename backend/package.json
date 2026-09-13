@@ -5,12 +5,14 @@
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
     "build": "tsc -p tsconfig.json",
+    "postinstall": "prisma generate",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node --env-file-if-exists=.env dist/index.js",
-    "test": "tsx src/tools/Tool.test.ts && tsx src/auth.test.ts"
+    "test": "tsx src/tools/Tool.test.ts && tsx src/auth.test.ts && tsx src/services/fileService.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",
+    "@fastify/multipart": "^10.1.1",
     "@google/genai": "^2.22.0",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",

@@ -1,5 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
-import type { AIProvider, ChatMessage, StreamChunk, ToolDef } from './AIProvider.js';
+import type { AIProvider, ChatMessage, InlinePart, StreamChunk, ToolDef } from './AIProvider.js';
 
 // Verified model IDs (ai.google.dev/gemini-api/docs/models).
 export const MODELS = {
@@ -28,23 +28,38 @@ export class GeminiProvider implements AIProvider {
    */
   async *streamChat(
     messages: ChatMessage[],
-    opts?: { model?: string; tools?: ToolDef[]; previousInteractionId?: string; functionResults?: FunctionResultInput[]; signal?: AbortSignal },
+    opts?: {
+      model?: string;
+      tools?: ToolDef[];
+      previousInteractionId?: string;
+      functionResults?: FunctionResultInput[];
+      signal?: AbortSignal;
+      /** §9 inline image/document parts on the last user turn. */
+      attachments?: InlinePart[];
+      /** §9 server-side extracted document text. */
+      extractedText?: string;
+    },
   ): AsyncGenerator<StreamChunk> {
     opts?.signal?.throwIfAborted?.();
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
     const turns = messages.filter((m) => m.role !== 'system');
 
-    const stream = await this.client.interactions.create({
+    const stream = (await this.client.interactions.create({
       model: opts?.model ?? MODELS.chat,
       input: opts?.functionResults?.length
-        ? opts.functionResults
-        : transcript(turns),
+        ? (opts.functionResults as unknown as Array<Record<string, unknown>>)
+        : (buildInput(turns, opts?.attachments, opts?.extractedText) as string),
       ...(opts?.previousInteractionId ? { previous_interaction_id: opts.previousInteractionId } : {}),
       ...(system ? { system_instruction: system } : {}),
       ...(opts?.tools?.length ? { tools: opts.tools.map(toToolDef) } : {}),
       store: true, // required for previous_interaction_id chaining
       stream: true,
-    });
+    } as Parameters<typeof this.client.interactions.create>[0])) as AsyncIterable<{
+      event_type: string;
+      delta?: { type: string; text: string };
+      step?: { type: string; name?: string; id?: string; arguments?: unknown };
+      interaction?: { id?: string };
+    }>;
 
     for await (const event of stream) {
       if (opts?.signal?.aborted) break;
@@ -93,10 +108,35 @@ export interface FunctionResultInput {
   is_error?: boolean;
 }
 
-/** Turn 1 input: a plain string transcript. Simplest form the API accepts. */
+/**
+ * Input builder: plain transcript normally; §9 structured content array when the
+ * last user turn carries inline attachments or extracted document text.
+ * Content blocks verified against SDK typings: image/document accept base64 `data`
+ * + `mime_type`; document mime limited to application/pdf and text/csv.
+ */
 function transcript(turns: ChatMessage[]): string {
   if (turns.length === 1) return turns[0]!.content;
   return turns.map((m) => `${m.role === 'model' ? 'Assistant' : 'User'}: ${m.content}`).join('\n\n');
+}
+
+function buildInput(
+  turns: ChatMessage[],
+  attachments: InlinePart[] = [],
+  extractedText?: string,
+): string | Array<Record<string, unknown>> {
+  if (!attachments.length && !extractedText) return transcript(turns);
+  const last = turns[turns.length - 1]!;
+  const prior = turns.slice(0, -1);
+  const blocks: Array<Record<string, unknown>> = [];
+  if (prior.length) blocks.push({ type: 'text', text: transcript(prior) + '\n\n' });
+  if (extractedText) blocks.push({ type: 'text', text: `[Attached file content]\n${extractedText}\n\n` });
+  for (const a of attachments) {
+    blocks.push(a.mime.startsWith('image/')
+      ? { type: 'image', mime_type: a.mime, data: a.data }
+      : { type: 'document', mime_type: a.mime, data: a.data });
+  }
+  blocks.push({ type: 'text', text: last.content });
+  return blocks;
 }
 
 function toToolDef(t: ToolDef) {

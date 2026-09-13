@@ -23,11 +23,24 @@ android {
     keyAlias = "androiddebugkey"
     keyPassword = "android"
   }
+  signingConfigs.create("preview") {
+    // Dedicated keystore for shareable preview builds (same key = stable update identity).
+    storeFile = rootProject.file("preview.keystore")
+    storePassword = "novapreview2026"
+    keyAlias = "novapreview"
+    keyPassword = "novapreview2026"
+  }
   buildTypes {
-    release { isMinifyEnabled = false }
+    // §46: NO Gemini keys here, ever. Only our backend base URL (all build types).
+    all {
+      buildConfigField("String", "API_BASE_URL", "\"https://nova-backend-beige.vercel.app\"")
+    }
+    release {
+      // Preview sharing: no obfuscation so friend-reported stack traces stay readable.
+      isMinifyEnabled = false
+      signingConfig = signingConfigs.getByName("preview")
+    }
     debug {
-      // §46: NO Gemini keys here, ever. Only our backend base URL.
-      buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:3000\"")
       signingConfig = signingConfigs.getByName("sandboxDebug")
     }
   }

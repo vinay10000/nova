@@ -40,7 +40,7 @@ tool permission checks, audit log, execution limits.
 ## MVP order (§50-§56)
 
 1. Phase 1: auth, chat, streaming, conversations, markdown — `Login>Chat>Gemini>SSE>Persist`
-2. Phase 2: files + multimodal + voice
+2. Phase 2: files + multimodal + voice — `attach>upload>sniff>Neon>extract>Gemini`, voice in/out — live-probed green
 3. Phase 3: agent framework (builder, tools, function-calling, Run Now)
 4. Phase 4: GitHub, Gmail, Calendar, Slack, Notion, then X/WhatsApp/Drive/LeetCode
 5. Phase 5: schedules, notifications, approvals, retries

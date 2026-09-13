@@ -34,6 +34,7 @@ data class StreamChunk(
   val conversationId: String,
   val message: String,
   val model: String? = null,
+  val attachmentIds: List<String> = emptyList(), // §10
 )
 
 /**
@@ -50,8 +51,8 @@ class ChatStreamClient(
     .readTimeout(0, TimeUnit.MILLISECONDS)
     .build()
 
-  fun stream(conversationId: String, message: String, model: String? = null): Flow<StreamChunk> = callbackFlow {
-    val payload = json.encodeToString(StreamRequest(conversationId, message, model))
+  fun stream(conversationId: String, message: String, model: String? = null, attachmentIds: List<String> = emptyList()): Flow<StreamChunk> = callbackFlow {
+    val payload = json.encodeToString(StreamRequest(conversationId, message, model, attachmentIds))
     val builder = Request.Builder()
       .url("$baseUrl/v1/chat/stream")
       .post(payload.toRequestBody("application/json".toMediaType()))
@@ -100,7 +101,15 @@ interface NovaApi {
 
   @retrofit2.http.GET("/v1/models")
   suspend fun models(): ModelsResponse
+
+  // §10 upload — backend validates magic bytes + size; the client only picks the file.
+  @retrofit2.http.Multipart
+  @retrofit2.http.POST("/v1/files")
+  suspend fun uploadFile(@retrofit2.http.Part file: okhttp3.MultipartBody.Part): FileDto
 }
+
+// Mirrors backend StoredFile (metadata only — bytes stay server-side, §46).
+@Serializable data class FileDto(val id: String, val filename: String, val mime: String, val size: Long, val status: String)
 
 @Serializable data class ModelDto(val id: String)
 @Serializable data class ModelsResponse(val models: List<ModelDto>)

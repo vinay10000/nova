@@ -4,6 +4,12 @@ export interface ChatMessage {
   content: string;
 }
 
+/** §9 multimodal: inline image/document block for the Gemini Interactions input. */
+export interface InlinePart {
+  mime: string;
+  data: string; // base64
+}
+
 // One chunk shape for chat AND agent runs, so the client has a single streaming path.
 export type StreamChunk =
   | { type: 'token'; text: string }
@@ -22,7 +28,16 @@ export interface ToolDef {
 export interface AIProvider {
   streamChat(
     messages: ChatMessage[],
-    opts?: { model?: string; tools?: ToolDef[]; previousInteractionId?: string; signal?: AbortSignal },
+    opts?: {
+      model?: string;
+      tools?: ToolDef[];
+      previousInteractionId?: string;
+      signal?: AbortSignal;
+      /** §9: inline image/document parts attached to the last user message. */
+      attachments?: InlinePart[];
+      /** §9: server-side extracted text (TXT/CSV/DOCX) prepended to the turn. */
+      extractedText?: string;
+    },
   ): AsyncGenerator<StreamChunk>; // §3, §6 must stream progressively
   generateAgentConfig(naturalLanguage: string): Promise<unknown>; // §12-§14 conversational builder
   titleFor(firstUserMessage: string): Promise<string>; // §8 auto-title
