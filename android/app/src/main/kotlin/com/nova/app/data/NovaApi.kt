@@ -107,6 +107,9 @@ interface NovaApi {
   @retrofit2.http.POST("/v1/files")
   suspend fun uploadFile(@retrofit2.http.Part file: okhttp3.MultipartBody.Part): FileDto
 
+  @retrofit2.http.GET("/v1/files/{id}/raw")
+  suspend fun rawFile(@retrofit2.http.Path("id") id: String): okhttp3.ResponseBody
+
   // §52 agent framework.
   @retrofit2.http.GET("/v1/agents")
   suspend fun agents(): AgentsResponse
@@ -154,7 +157,8 @@ interface NovaApi {
 @Serializable data class LoginRequest(val email: String, val password: String)
 @Serializable data class AuthResponse(val token: String)
 @Serializable data class ConversationsResponse(val conversations: List<ConversationDto>)
-@Serializable data class MessageDto(val id: String = "", val role: String, val content: String)
+@Serializable data class MessageDto(val id: String = "", val role: String, val content: String, val attachments: List<AttachmentInfo> = emptyList())
+@Serializable data class AttachmentInfo(val id: String, val filename: String, val mime: String, val size: Long = 0)
 @Serializable data class ConversationDetailDto(
   val id: String,
   val title: String,

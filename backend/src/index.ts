@@ -2,9 +2,10 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import { z } from 'zod';
+import { createHash } from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
-import { GeminiProvider, MODELS } from './ai/GeminiProvider.js';
+import { OpenAIProvider, MODELS } from './ai/OpenAIProvider.js';
 import { createChatService, ConversationNotFoundError } from './services/chatService.js';
 import { executeAgent, scopesForTools } from './services/agentService.js';
 import { toolRegistry } from './tools/registry.js';
@@ -28,13 +29,13 @@ if (!process.env.DATABASE_URL) {
 if (!process.env.AUTH_JWT_SECRET || process.env.AUTH_JWT_SECRET === 'change-me' || process.env.AUTH_JWT_SECRET === 'dev-only-change-me') {
   throw new Error('AUTH_JWT_SECRET must be set to a real secret');
 }
-if (!process.env.GEMINI_API_KEY) {
-  app.log.warn('[config] GEMINI_API_KEY is not set — chat features will fail.');
+if (!process.env.AI_API_KEY) {
+  app.log.warn('[config] AI_API_KEY is not set — chat features will fail.');
 }
 
 // Prisma 7 requires a driver adapter; pg connects directly to Postgres.
 const db = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) });
-const ai = new GeminiProvider();
+const ai = new OpenAIProvider();
 const chat = createChatService(ai, prismaChatStore(db), prismaAttachmentSource(db));
 const files = createFileService(db);
 await app.register(multipart, { limits: { fileSize: MAX_FILE_BYTES } });
@@ -122,7 +123,14 @@ app.get('/v1/conversations/:id', async (req, reply) => {
   const { id } = req.params as { id: string };
   const conv = await db.conversation.findFirst({
     where: { id, userId }, // userId in the filter = isolation, not a post-check
-    include: { messages: { orderBy: { createdAt: 'asc' } } },
+    include: {
+      messages: {
+        orderBy: { createdAt: 'asc' },
+        include: {
+          attachments: { select: { id: true, filename: true, mime: true, size: true } },
+        },
+      },
+    },
   });
   return conv ?? reply.code(404).send({ error: 'not_found' });
 });
@@ -174,6 +182,18 @@ app.get('/v1/files/:id', async (req, reply) => {
   // Metadata only — the binary stays out of JSON responses; inline data flows to Gemini server-side.
   if (!att) return reply.code(404).send({ error: 'not_found' });
   return { id: att.id, filename: att.filename, mime: att.mime, size: att.size, status: att.status, url: att.url };
+});
+
+app.get('/v1/files/:id/raw', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return;
+  const { id } = req.params as { id: string };
+  const att = await files.get(userId, id);
+  if (!att || !att.data) return reply.code(404).send({ error: 'not_found' });
+  return reply
+    .header('Content-Type', att.mime)
+    .header('Cache-Control', 'public, max-age=86400')
+    .send(Buffer.from(att.data));
 });
 
 // ---- §3/§6 streaming chat (SSE) ---------------------------------------------
@@ -254,12 +274,26 @@ function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
   return Buffer.concat([h, pcm]);
 }
 
+// ---- TTS cache: SHA-256(text) -> WAV buffer, capped at 500 entries ----------
+const ttsCache = new Map<string, Buffer>();
+const TTS_CACHE_MAX = 500;
+
+function ttsCacheKey(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
 app.post('/v1/tts', async (req, reply) => {
   const userId = await requireUser(req, reply);
   if (!userId) return reply;
   if (!process.env.OPENROUTER_API_KEY) return reply.code(503).send({ error: 'tts_unconfigured' });
   const body = z.object({ text: z.string().min(1).max(4000) }).safeParse(req.body);
   if (!body.success) return reply.code(400).send({ error: 'invalid_input' });
+
+  const key = ttsCacheKey(body.data.text);
+  const cached = ttsCache.get(key);
+  if (cached) {
+    return reply.header('Content-Type', 'audio/wav').header('X-TTS-Cache', 'hit').send(cached);
+  }
 
   const r = await fetch('https://openrouter.ai/api/v1/audio/speech', {
     method: 'POST',
@@ -273,7 +307,16 @@ app.post('/v1/tts', async (req, reply) => {
 
   const pcm = Buffer.from(await r.arrayBuffer());
   const rate = Number((r.headers.get('content-type') ?? '').match(/rate=(\d+)/)?.[1] ?? 44100);
-  return reply.header('Content-Type', 'audio/wav').send(pcmToWav(pcm, rate));
+  const wav = pcmToWav(pcm, rate);
+
+  // Evict oldest entry if over cap
+  if (ttsCache.size >= TTS_CACHE_MAX) {
+    const first = ttsCache.keys().next().value!;
+    ttsCache.delete(first);
+  }
+  ttsCache.set(key, wav);
+
+  return reply.header('Content-Type', 'audio/wav').header('X-TTS-Cache', 'miss').send(wav);
 });
 
 // ---- §52 agent framework: builder, config, Run Now, executions, approvals --

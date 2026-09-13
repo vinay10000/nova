@@ -61,10 +61,14 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
         if (f.status === 'extracted' && f.extractedText) extractedText = (extractedText ? extractedText + '\n\n' : '') + f.extractedText;
       }
 
+      // Auto-route image messages to stepfun-3.7-flash (vision-capable) when no explicit model is chosen.
+      const hasImage = inlineParts.some((p) => p.mime.startsWith('image/'));
+      const resolvedModel = hasImage && !model ? 'stepfun-3.7-flash' : model;
+
       let full = '';
       for await (const chunk of ai.streamChat(
         [...history.map((m) => ({ role: m.role as 'user' | 'model', content: m.content })), { role: 'user' as const, content: message }],
-        { model, signal, attachments: inlineParts, extractedText },
+        { model: resolvedModel, signal, attachments: inlineParts, extractedText },
       )) {
         if (signal?.aborted) break;
         if (chunk.type === 'token') full += chunk.text;

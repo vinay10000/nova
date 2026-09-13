@@ -5,7 +5,7 @@ import type { AIProvider, ChatMessage, InlinePart, StreamChunk, ToolDef } from '
 // the model selector serves this list, so audio/image variants must not leak in.
 // TTS output = Fish Audio S2.1 via OpenRouter (/v1/tts); STT = Android SpeechRecognizer.
 export const MODELS = {
-  chat: 'gemini-3.8-flash',
+  chat: 'gemini-3.5-flash-lite',
   cheap: 'gemini-3.5-flash-lite',
   reasoning: 'gemini-3.1-pro-preview',
 } as const;

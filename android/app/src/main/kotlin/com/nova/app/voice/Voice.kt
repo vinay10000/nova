@@ -11,6 +11,7 @@ import android.speech.tts.TextToSpeech
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.security.MessageDigest
 import java.util.Locale
 
 /**
@@ -102,8 +103,30 @@ class RemoteVoiceOutput(private val tokenProvider: () -> String?) {
 
   @kotlinx.serialization.Serializable private data class TtsRequest(val text: String)
 
+  private fun cacheKey(text: String): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray())
+    return digest.joinToString("") { "%02x".format(it) }
+  }
+
+  private fun cacheDir(context: Context): File =
+    File(context.cacheDir, "tts").also { it.mkdirs() }
+
+  private fun evictOldCache(dir: File, maxFiles: Int = 200) {
+    val files = dir.listFiles()?.filter { it.name.endsWith(".wav") }?.sortedBy { it.lastModified() } ?: return
+    if (files.size > maxFiles) {
+      files.take(files.size - maxFiles).forEach { it.delete() }
+    }
+  }
+
   suspend fun speak(context: Context, text: String): Boolean = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
     val token = tokenProvider() ?: return@withContext false
+    val dir = cacheDir(context)
+    val key = cacheKey(text)
+    val cached = File(dir, "$key.wav")
+    if (cached.exists() && cached.length() > 0) {
+      playWav(cached)
+      return@withContext true
+    }
     runCatching {
       val body = json.encodeToString(TtsRequest.serializer(), TtsRequest(text.take(4000)))
         .toRequestBody("application/json".toMediaTypeOrNull())
@@ -114,16 +137,20 @@ class RemoteVoiceOutput(private val tokenProvider: () -> String?) {
         .build()
       client.newCall(req).execute().use { resp ->
         if (!resp.isSuccessful) return@use false
-        val wav = File(context.cacheDir, "nova_tts.wav")
-        wav.writeBytes(resp.body!!.bytes())
-        MediaPlayer().apply {
-          setDataSource(wav.absolutePath)
-          setOnCompletionListener { it.release() }
-          prepare()
-          start()
-        }
+        cached.writeBytes(resp.body!!.bytes())
+        playWav(cached)
+        evictOldCache(dir)
         true
       }
     }.getOrDefault(false)
+  }
+
+  private fun playWav(file: File) {
+    MediaPlayer().apply {
+      setDataSource(file.absolutePath)
+      setOnCompletionListener { it.release() }
+      prepare()
+      start()
+    }
   }
 }
