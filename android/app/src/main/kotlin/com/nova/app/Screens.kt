@@ -468,12 +468,6 @@ private fun TypingIndicator(modifier: Modifier = Modifier) {
   }
 }
 
-private val ChatSuggestions = listOf(
-  "Draft a morning brief from my inbox" to "Inbox triage, summarized before coffee.",
-  "Explain this code, line by line" to "Paste code below, get a plain-language walkthrough.",
-  "Plan a focused week" to "Turn a scattered list into three clear days.",
-)
-
 @Composable
 fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit = {}, onConnectionsClick: () -> Unit = {}, vm: ChatViewModel = viewModel()) {
   LaunchedEffect(session) { vm.configureSession(session) }
@@ -495,16 +489,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   }
   LaunchedEffect(Unit) {
     runCatching { models = api.models().models }
-    refreshConversations()
     runCatching {
-      val existing = conversations.firstOrNull()
-      if (existing != null) {
-        val detail = api.conversation(existing.id)
-        vm.openConversation(detail.id, detail.messages.map { Message(it.id, it.role, it.content, it.attachments) })
-      } else {
-        vm.setConversation(api.createConversation().id)
-        refreshConversations()
-      }
+      vm.setConversation(api.createConversation().id)
     }.onFailure { offline = true }
   }
   val messages by vm.messages.collectAsState()
@@ -719,15 +705,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     ) {
       if (messages.isEmpty()) {
         item {
-          // Signature opener: left-aligned serif statement + numbered starters. No centered icon stack.
           Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp)) {
-            Text(
-              "35",
-              fontFamily = NovaMono,
-              style = MaterialTheme.typography.labelMedium,
-              color = scheme.primary,
-            )
-            Spacer(Modifier.height(8.dp))
             Text(
               "What needs\ndoing today?",
               fontFamily = NovaDisplay,
@@ -737,36 +715,10 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             )
             Spacer(Modifier.height(10.dp))
             Text(
-              "Nova reads, writes, searches and runs errands across your tools. Pick a starter or just write below.",
+              "Nova reads, writes, searches and runs errands across your tools.",
               style = MaterialTheme.typography.bodyMedium,
               color = scheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(18.dp))
-            ChatSuggestions.forEachIndexed { i, (title, sub) ->
-              Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = scheme.surfaceVariant,
-                tonalElevation = 1.dp,
-                modifier = Modifier.fillMaxWidth().clickable { input = title },
-              ) {
-                Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                  Text(
-                    "0${i + 1}",
-                    fontFamily = NovaMono,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = scheme.primary,
-                    modifier = Modifier.width(30.dp),
-                  )
-                  Column(Modifier.weight(1f)) {
-                    Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface)
-                    Spacer(Modifier.height(2.dp))
-                    Text(sub, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-                  }
-                  Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
-                }
-              }
-              Spacer(Modifier.height(10.dp))
-            }
           }
         }
       }

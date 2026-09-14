@@ -196,7 +196,7 @@ function buildInput(
 }
 
 function toToolDef(t: ToolDef) {
-  return { type: 'function' as const, name: t.name, description: t.description, parameters: t.parameters };
+  return { type: 'function' as const, function: { name: t.name, description: t.description, parameters: t.parameters } };
 }
 
 function outputText(res: unknown): string {
