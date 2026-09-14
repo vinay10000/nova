@@ -1,5 +1,6 @@
 import type { Tool, ToolContext } from './Tool.js';
 import { getGitHubToken } from '../integrations/github.js';
+import { getGmailAccessToken, GMAIL_API } from '../integrations/gmail.js';
 
 const GITHUB_API = 'https://api.github.com';
 
@@ -187,11 +188,184 @@ const webSearch: Tool = {
   },
 };
 
+/**
+ * §17 Gmail fetch helper. Access token auto-refreshes in place (§38).
+ * §46: token is never stored in logs or step metadata.
+ */
+async function gmailFetch(ctx: ToolContext, path: string, init?: RequestInit): Promise<unknown> {
+  const token = await getGmailAccessToken(ctx.db, ctx.userId);
+  if (!token) throw new Error('gmail_not_connected');
+  const res = await fetch(`${GMAIL_API}${path}`, {
+    ...init,
+    headers: { Authorization: `Bearer ${token}`, ...init?.headers },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Gmail API ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+/** Gmail payloads are base64url — convert to utf8 text. */
+function b64urlToText(data?: string): string {
+  if (!data) return '';
+  const b64 = data.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(b64, 'base64').toString('utf8');
+}
+
+interface GmailPayload {
+  mimeType?: string;
+  body?: { data?: string };
+  parts?: GmailPayload[];
+  headers?: { name: string; value: string }[];
+}
+
+function headerOf(payload: GmailPayload | undefined, name: string): string {
+  return payload?.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? '';
+}
+
+/** Prefer text/plain, fall back to text/html stripped of tags. Truncated by caller. */
+function extractGmailBody(payload?: GmailPayload): string {
+  if (!payload) return '';
+  const walk = (p: GmailPayload, prefer: string): string | null => {
+    if (p.mimeType === prefer && p.body?.data) return b64urlToText(p.body.data);
+    for (const part of p.parts ?? []) {
+      const hit = walk(part, prefer);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const plain = walk(payload, 'text/plain');
+  if (plain) return plain;
+  const html = walk(payload, 'text/html');
+  if (html) return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (payload.body?.data) return b64urlToText(payload.body.data);
+  return '';
+}
+
+// Level 1 native: gmail read tools are chat-safe; send is write-gated (§17/§36).
+const gmailListMessages: Tool = {
+  id: 'gmail.list_messages',
+  description: 'List recent Gmail messages, optionally filtered by Gmail search query (§17)',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'Gmail search query, e.g. "from:boss newer_than:7d"' },
+      maxResults: { type: 'number', description: 'Max messages (1-20, default 10)' },
+    },
+  },
+  scope: 'gmail.readonly',
+  isWrite: false,
+  approval: 'never',
+  execute: async (input, ctx) => {
+    const { query = '', maxResults = 10 } = (input as Record<string, unknown>) ?? {};
+    const n = Math.min(20, Math.max(1, Number(maxResults) || 10));
+    const params = new URLSearchParams({ maxResults: String(n), ...(query ? { q: String(query) } : {}) });
+    const list = (await gmailFetch(ctx, `/users/me/messages?${params}`)) as {
+      messages?: { id: string; threadId: string }[];
+    };
+    const items = list.messages ?? [];
+    // Hydrate each message with Subject/From/Date metadata (bounded by n <= 20).
+    const hydrated = await Promise.all(
+      items.map(async (m) => {
+        const full = (await gmailFetch(ctx, `/users/me/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`)) as {
+          snippet?: string;
+          payload?: GmailPayload;
+        };
+        return {
+          id: m.id,
+          threadId: m.threadId,
+          subject: headerOf(full.payload, 'Subject'),
+          from: headerOf(full.payload, 'From'),
+          date: headerOf(full.payload, 'Date'),
+          snippet: (full.snippet ?? '').slice(0, 300),
+        };
+      }),
+    );
+    return { messages: hydrated };
+  },
+};
+
+const gmailGetMessage: Tool = {
+  id: 'gmail.get_message',
+  description: 'Get a full Gmail message by id, with decoded body text (§17)',
+  inputSchema: {
+    type: 'object',
+    properties: { id: { type: 'string', description: 'Gmail message id from list_messages' } },
+    required: ['id'],
+  },
+  scope: 'gmail.readonly',
+  isWrite: false,
+  approval: 'never',
+  execute: async (input, ctx) => {
+    const { id } = input as Record<string, unknown>;
+    if (typeof id !== 'string' || !id.trim()) throw new Error('invalid_input: id is required');
+    const full = (await gmailFetch(ctx, `/users/me/messages/${encodeURIComponent(id)}?format=full`)) as {
+      snippet?: string;
+      payload?: GmailPayload;
+    };
+    return {
+      id,
+      subject: headerOf(full.payload, 'Subject'),
+      from: headerOf(full.payload, 'From'),
+      to: headerOf(full.payload, 'To'),
+      date: headerOf(full.payload, 'Date'),
+      snippet: full.snippet ?? '',
+      body: extractGmailBody(full.payload).slice(0, 8000),
+    };
+  },
+};
+
+const gmailSendMessage: Tool = {
+  id: 'gmail.send_message',
+  description: 'Send an email via Gmail (§17 write — always requires human approval)',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      to: { type: 'string', description: 'Recipient email address' },
+      subject: { type: 'string' },
+      body: { type: 'string', description: 'Plain-text email body' },
+      cc: { type: 'string' },
+      bcc: { type: 'string' },
+    },
+    required: ['to', 'subject', 'body'],
+  },
+  scope: 'gmail.send',
+  isWrite: true,
+  approval: 'always', // §36/§47 every send passes a human checkpoint
+  execute: async (input, ctx) => {
+    const { to, subject, body, cc, bcc } = input as Record<string, unknown>;
+    if (typeof to !== 'string' || !to.includes('@')) throw new Error('invalid_input: valid "to" email is required');
+    if (typeof subject !== 'string' || !subject.trim()) throw new Error('invalid_input: subject is required');
+    if (typeof body !== 'string' || !body.trim()) throw new Error('invalid_input: body is required');
+    const lines = [
+      `To: ${to}`,
+      ...(typeof cc === 'string' && cc ? [`Cc: ${cc}`] : []),
+      ...(typeof bcc === 'string' && bcc ? [`Bcc: ${bcc}`] : []),
+      `Subject: ${String(subject).replace(/[\r\n]/g, ' ')}`,
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      String(body),
+    ];
+    const raw = Buffer.from(lines.join('\r\n'), 'utf8')
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    return gmailFetch(ctx, '/users/me/messages/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw }),
+    });
+  },
+};
+
 export const toolRegistry = new Map<string, Tool>(
   [
     githubListIssues, githubCreateIssue, githubListPullRequests,
     githubGetIssue, githubCommentOnIssue, githubListRepositories,
     githubGetNotifications, webSearch,
+    gmailListMessages, gmailGetMessage, gmailSendMessage,
   ].map((t) => [t.id, t]),
 );
 

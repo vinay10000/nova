@@ -105,3 +105,17 @@ paths:
       responses: { '200': { description: ok } }
   /v1/connections:
     get: { summary: OAuth connections (§38), responses: { '200': { description: ok } } }
+  /v1/connections/github/authorize:
+    get: { summary: Start GitHub OAuth (§38), responses: { '200': { description: ok } } }
+  /v1/connections/github/callback:
+    get: { summary: GitHub OAuth callback (§38), responses: { '200': { description: redirect } } }
+  /v1/connections/github/status:
+    get: { summary: GitHub connection status (§38), responses: { '200': { description: ok } } }
+  /v1/connections/gmail/authorize:
+    get: { summary: Start Gmail OAuth (§38 — Google consent, offline access), responses: { '200': { description: ok }, '500': { description: gmail_oauth_config_error } } }
+  /v1/connections/gmail/callback:
+    get: { summary: Gmail OAuth callback (§38), responses: { '200': { description: redirect } } }
+  /v1/connections/gmail/status:
+    get: { summary: Gmail connection status (§38), responses: { '200': { description: ok } } }
+  /v1/plugins:
+    get: { summary: Chat plugins — @mentions (§42), responses: { '200': { description: ok } } }

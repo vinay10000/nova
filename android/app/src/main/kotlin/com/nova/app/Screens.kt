@@ -332,6 +332,12 @@ class ChatViewModel(
             }
           }
         }
+      // Fallback: if the stream closed without a 'done' event, promote whatever
+      // was accumulated so the response is not silently dropped.
+      val leftover = _streamingMsg.value
+      if (leftover != null && leftover.content.isNotEmpty()) {
+        _messages.value = _messages.value + leftover
+      }
       _streamingMsg.value = null
       _streaming.value = false
     }
@@ -469,7 +475,7 @@ private val ChatSuggestions = listOf(
 )
 
 @Composable
-fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit = {}, vm: ChatViewModel = viewModel()) {
+fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit = {}, onConnectionsClick: () -> Unit = {}, vm: ChatViewModel = viewModel()) {
   LaunchedEffect(session) { vm.configureSession(session) }
   LaunchedEffect(api) { vm.configureApi(api) }
   var conversations by remember { mutableStateOf<List<ConversationDto>>(emptyList()) }
@@ -1007,7 +1013,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                   DropdownMenuItem(
                     text = { Text("Plugins") },
                     leadingIcon = { Icon(Icons.Default.Code, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                    onClick = { showAttachMenu = false },
+                    onClick = { showAttachMenu = false; onConnectionsClick() },
                   )
                 }
               }
@@ -1485,26 +1491,36 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               scope.launch {
                 when (p.id) {
                   "github" -> runCatching { api.disconnectGitHub() }.onSuccess { refresh() }
+                  "gmail" -> runCatching { api.disconnectGmail() }.onSuccess { refresh() }
                 }
               }
             }) {
               Text("Disconnect", color = scheme.error, style = MaterialTheme.typography.labelMedium)
             }
-          } else if (p.id == "github") {
-            // §38: GitHub OAuth — redirect user to GitHub to authorize
+          } else if (p.id == "github" || p.id == "gmail") {
+            // §38: OAuth — redirect user to the provider to authorize.
+            // Backend callback redirects to nova://connections/{provider}/connected;
+            // ON_RESUME above refreshes state when the user returns.
             TextButton(
               enabled = !isConnecting,
               onClick = {
                 scope.launch {
                   connecting = p.id
-                  runCatching { api.githubAuthorize() }
-                    .onSuccess { auth ->
-                      // Open GitHub OAuth in the browser — user authorizes there.
-                      // Backend callback redirects to nova://connections/github/connected.
-                      val intent = Intent(Intent.ACTION_VIEW, Uri.parse(auth.url))
-                      context.startActivity(intent)
-                    }
-                    .onFailure { error = "Could not start GitHub connection. Check backend config." }
+                  if (p.id == "github") {
+                    runCatching { api.githubAuthorize() }
+                      .onSuccess { auth ->
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(auth.url))
+                        context.startActivity(intent)
+                      }
+                      .onFailure { error = "Could not start GitHub connection. Check backend config." }
+                  } else {
+                    runCatching { api.gmailAuthorize() }
+                      .onSuccess { auth ->
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(auth.url))
+                        context.startActivity(intent)
+                      }
+                      .onFailure { error = "Could not start Gmail connection. Check backend config." }
+                  }
                   connecting = null
                 }
               },

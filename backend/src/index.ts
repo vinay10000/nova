@@ -21,6 +21,13 @@ import {
   getGitHubUser,
   disconnectGitHub,
 } from './integrations/github.js';
+import {
+  buildGmailAuthorizeUrl,
+  exchangeCodeForGmailToken,
+  storeGmailConnection,
+  disconnectGmail,
+  GMAIL_SCOPES,
+} from './integrations/gmail.js';
 import { chatPlugins } from './services/chatPlugins.js';
 
 const app = Fastify({ logger: true });
@@ -613,6 +620,79 @@ app.get('/v1/connections/github/status', async (req, reply) => {
   if (!userId) return reply;
   const conn = await db.connection.findFirst({
     where: { userId, provider: 'github' },
+    select: { status: true, providerLogin: true, scopes: true, createdAt: true },
+  });
+  return { connected: conn?.status === 'connected', login: conn?.providerLogin ?? null, scopes: conn?.scopes ?? [] };
+});
+
+// ---- §38 Connections: Gmail OAuth --------------------------------------------
+
+// §38: Start Gmail OAuth — returns the Google consent URL to redirect to.
+app.get('/v1/connections/gmail/authorize', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  try {
+    const { url, state, codeVerifier } = buildGmailAuthorizeUrl(userId);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    await db.oAuthState.create({
+      data: {
+        state,
+        userId,
+        provider: 'gmail',
+        codeVerifier,
+        scopes: GMAIL_SCOPES.join(' '),
+        expiresAt,
+      },
+    });
+    return { url, state };
+  } catch (err) {
+    req.log.error(err);
+    return reply.code(500).send({ error: 'gmail_oauth_config_error' });
+  }
+});
+
+// §38: Gmail OAuth callback — exchanges code, stores encrypted connection.
+// Backend-only; redirects to the app via deep link.
+app.get('/v1/connections/gmail/callback', async (req, reply) => {
+  const { code, state } = req.query as { code?: string; state?: string };
+  if (!code || !state) return reply.code(400).send({ error: 'missing_code_or_state' });
+
+  const stateRow = await db.oAuthState.findUnique({ where: { state } });
+  if (!stateRow) return reply.code(400).send({ error: 'invalid_state' });
+  if (stateRow.expiresAt < new Date()) {
+    await db.oAuthState.delete({ where: { state } });
+    return reply.code(400).send({ error: 'state_expired' });
+  }
+
+  try {
+    const tokens = await exchangeCodeForGmailToken(code, stateRow.codeVerifier);
+    await storeGmailConnection(db, stateRow.userId, tokens);
+    await db.oAuthState.delete({ where: { state } });
+    const deepLink = process.env.DEEP_LINK_SCHEME ?? 'nova';
+    return reply.redirect(`${deepLink}://connections/gmail/connected`);
+  } catch (err) {
+    req.log.error(err);
+    await db.oAuthState.delete({ where: { state } }).catch(() => {});
+    const msg = err instanceof Error ? err.message : '';
+    if (/refresh_token/.test(msg)) return reply.code(500).send({ error: 'gmail_refresh_token_missing' });
+    return reply.code(500).send({ error: 'gmail_token_exchange_failed' });
+  }
+});
+
+// §38: Disconnect Gmail — removes the connection row.
+app.delete('/v1/connections/gmail', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const removed = await disconnectGmail(db, userId);
+  return { ok: removed };
+});
+
+// §38: Gmail connection status for polling.
+app.get('/v1/connections/gmail/status', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const conn = await db.connection.findFirst({
+    where: { userId, provider: 'gmail' },
     select: { status: true, providerLogin: true, scopes: true, createdAt: true },
   });
   return { connected: conn?.status === 'connected', login: conn?.providerLogin ?? null, scopes: conn?.scopes ?? [] };

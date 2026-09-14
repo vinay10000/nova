@@ -28,6 +28,10 @@ const GITHUB_READ_TOOLS = [
   'github.get_notifications',
 ];
 
+// §17: only read tools are auto-activated by @gmail in chat.
+// gmail.send_message stays agent-side behind approval (§36).
+const GMAIL_READ_TOOLS = ['gmail.list_messages', 'gmail.get_message'];
+
 export const chatPlugins: ChatPlugin[] = [
   {
     id: 'github',
@@ -37,6 +41,15 @@ export const chatPlugins: ChatPlugin[] = [
       'The user is asking about their GitHub account. Use the GitHub tools to answer their question. ' +
       'Be concise. If the user asks about repos, list them. If they ask about issues or PRs, summarize what matters. ' +
       'Never fabricate data — always call the tools to get real information.',
+  },
+  {
+    id: 'gmail',
+    name: 'Gmail',
+    toolIds: GMAIL_READ_TOOLS,
+    systemInstruction:
+      'The user is asking about their Gmail inbox. Use the Gmail tools to answer. ' +
+      'list_messages for search/recent mail, get_message for full bodies. ' +
+      'Be concise. Never fabricate mail — always call the tools. Never send without explicit approval.',
   },
 ];
 

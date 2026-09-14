@@ -31,7 +31,7 @@ fun NovaNav(session: SessionToken, onAccentChanged: () -> Unit = {}) {
         exitTransition = { fadeOut(tween(150)) },
         popEnterTransition = { fadeIn(tween(200)) },
         popExitTransition = { fadeOut(tween(150)) },
-      ) { ChatScreen(api, session, onSettingsClick = { nav.navigate("settings") }) }
+      ) { ChatScreen(api, session, onSettingsClick = { nav.navigate("settings") }, onConnectionsClick = { nav.navigate("connections") }) }
       composable(
         "agents",
         enterTransition = { fadeIn(tween(200)) },

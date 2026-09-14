@@ -123,7 +123,8 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
             // Yield a step event so the UI can show "Checking GitHub..."
             yield { type: 'step', label: chunk.toolId };
           } else if (chunk.type === 'done') {
-            // done from this turn
+            // Forward done to the client so the UI can finalize the streaming message.
+            yield chunk;
           } else if (chunk.type === 'error') {
             yield chunk;
             return;

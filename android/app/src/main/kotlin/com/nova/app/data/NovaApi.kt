@@ -159,6 +159,15 @@ interface NovaApi {
 
   @retrofit2.http.DELETE("/v1/connections/github")
   suspend fun disconnectGitHub(): OkResponse
+
+  @retrofit2.http.GET("/v1/connections/gmail/authorize")
+  suspend fun gmailAuthorize(): GmailAuthorizeResponse
+
+  @retrofit2.http.GET("/v1/connections/gmail/status")
+  suspend fun gmailStatus(): GmailStatusResponse
+
+  @retrofit2.http.DELETE("/v1/connections/gmail")
+  suspend fun disconnectGmail(): OkResponse
 }
 
 // Mirrors backend StoredFile (metadata only — bytes stay server-side, §46).
@@ -221,3 +230,5 @@ interface NovaApi {
 @Serializable data class ConnectionsResponse(val connections: List<ConnectionDto> = emptyList())
 @Serializable data class GitHubAuthorizeResponse(val url: String, val state: String)
 @Serializable data class GitHubStatusResponse(val connected: Boolean, val login: String? = null, val scopes: List<String> = emptyList())
+@Serializable data class GmailAuthorizeResponse(val url: String, val state: String)
+@Serializable data class GmailStatusResponse(val connected: Boolean, val login: String? = null, val scopes: List<String> = emptyList())
