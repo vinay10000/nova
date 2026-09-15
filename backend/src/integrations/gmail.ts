@@ -109,12 +109,12 @@ async function refreshGmailAccessToken(refreshToken: string): Promise<GmailToken
   return (await res.json()) as GmailTokens;
 }
 
-async function fetchGmailProfile(accessToken: string): Promise<{ email: string; id?: string }> {
+async function fetchGmailProfile(accessToken: string): Promise<{ emailAddress: string; id?: string }> {
   const res = await fetch(`${GMAIL_API}/users/me/profile`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok) throw new Error(`Gmail profile fetch failed: ${res.status}`);
-  return (await res.json()) as { emailAddress: string; id?: string } as unknown as { email: string; id?: string };
+  return (await res.json()) as { emailAddress: string; id?: string };
 }
 
 /**
@@ -128,7 +128,7 @@ export async function storeGmailConnection(
 ): Promise<void> {
   if (!tokens.refresh_token) throw new Error('Gmail OAuth did not return a refresh_token (access_type=offline required)');
   const profile = await fetchGmailProfile(tokens.access_token);
-  const email = (profile as unknown as { emailAddress?: string }).emailAddress ?? profile.email ?? '';
+  const email = profile.emailAddress ?? '';
   const blob: StoredGmailTokens = {
     access_token: tokens.access_token,
     refresh_token: tokens.refresh_token,
@@ -161,15 +161,19 @@ export async function storeGmailConnection(
 
 /**
  * Retrieve a live Gmail access token, refreshing in place when expired.
+ * Pass { forceRefresh: true } after a 401 so a stale-token read retries once.
  * §46: decrypted only in tool execution scope, never logged.
  */
 export async function getGmailAccessToken(
   db: PrismaClient,
   userId: string,
+  opts?: { forceRefresh?: boolean },
 ): Promise<string | null> {
   const conn = await db.connection.findFirst({
-    where: { userId, provider: 'gmail', status: 'connected' },
+    where: { userId, provider: 'gmail' },
   });
+  // A row marked 'expired' is still tried: a successful refresh means Google
+  // accepted us again, and the status is healed below.
   if (!conn) return null;
   let stored: StoredGmailTokens;
   try {
@@ -179,23 +183,58 @@ export async function getGmailAccessToken(
   }
   if (!stored.access_token || !stored.refresh_token) return null;
   // 60s skew so a token expiring mid-request still refreshes first.
-  if (stored.expiry - Date.now() > 60_000) return stored.access_token;
+  const fresh = opts?.forceRefresh === true || stored.expiry - Date.now() <= 60_000;
+  if (!fresh) return stored.access_token;
 
   try {
-    const fresh = await refreshGmailAccessToken(stored.refresh_token);
+    const refreshed = await refreshGmailAccessToken(stored.refresh_token);
     const updated: StoredGmailTokens = {
-      access_token: fresh.access_token,
+      access_token: refreshed.access_token,
       refresh_token: stored.refresh_token, // Google omits refresh_token on refresh
-      expiry: Date.now() + (fresh.expires_in ?? 3600) * 1000,
+      expiry: Date.now() + (refreshed.expires_in ?? 3600) * 1000,
     };
     await db.connection.update({
       where: { id: conn.id },
-      data: { encryptedToken: encryptToken(JSON.stringify(updated)), lastRefreshedAt: new Date() },
+      data: {
+        encryptedToken: encryptToken(JSON.stringify(updated)),
+        lastRefreshedAt: new Date(),
+        ...(conn.status === 'connected' ? {} : { status: 'connected' }),
+      },
     });
     return updated.access_token;
   } catch {
     return null;
   }
+}
+
+/**
+ * §38: the refresh token itself was rejected (revoked/uninstalled). Flag the
+ * connection so the UI asks for a reconnect instead of failing every call.
+ */
+export async function markGmailConnectionExpired(db: PrismaClient, userId: string): Promise<void> {
+  await db.connection
+    .updateMany({ where: { userId, provider: 'gmail' }, data: { status: 'expired' } })
+    .catch(() => {});
+}
+
+/** §38: live health check for the Connections screen. */
+export async function verifyGmailConnection(
+  db: PrismaClient,
+  userId: string,
+): Promise<{ connected: boolean; ok: boolean; login: string | null }> {
+  const conn = await db.connection.findFirst({
+    where: { userId, provider: 'gmail' },
+    select: { status: true, providerLogin: true },
+  });
+  const token = await getGmailAccessToken(db, userId, { forceRefresh: true });
+  if (!token) {
+    if (conn) await markGmailConnectionExpired(db, userId);
+    return { connected: !!conn, ok: false, login: conn?.providerLogin ?? null };
+  }
+  if (conn && conn.status !== 'connected') {
+    await db.connection.updateMany({ where: { userId, provider: 'gmail' }, data: { status: 'connected' } }).catch(() => {});
+  }
+  return { connected: true, ok: true, login: conn?.providerLogin ?? null };
 }
 
 export async function disconnectGmail(db: PrismaClient, userId: string): Promise<boolean> {

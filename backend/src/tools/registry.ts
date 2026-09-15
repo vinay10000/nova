@@ -1,6 +1,17 @@
 import type { Tool, ToolContext } from './Tool.js';
-import { getGitHubToken } from '../integrations/github.js';
-import { getGmailAccessToken, GMAIL_API } from '../integrations/gmail.js';
+import { getGitHubToken, markGitHubConnectionExpired } from '../integrations/github.js';
+import { getGmailAccessToken, markGmailConnectionExpired, GMAIL_API } from '../integrations/gmail.js';
+import { getCalendarAccessToken, markCalendarConnectionExpired, CALENDAR_API } from '../integrations/googleCalendar.js';
+import {
+  assertUsername,
+  getContestHistory,
+  getDailyChallenge,
+  getProblem,
+  getProfile,
+  getRecentSubmissions,
+  getSolved,
+  searchProblems,
+} from '../integrations/leetcode.js';
 
 const GITHUB_API = 'https://api.github.com';
 
@@ -20,6 +31,18 @@ async function githubFetch(ctx: ToolContext, path: string, init?: RequestInit): 
       ...init?.headers,
     },
   });
+  if (res.status === 401 || res.status === 403) {
+    // The token GitHub handed us is no longer accepted (revoked, reset, or the
+    // app was uninstalled). Flag the connection so the UI stops saying
+    // "Connected" and offers a reconnect — the error text is what the model
+    // relays to the user, so it must name the fix.
+    const body = await res.text().catch(() => '');
+    if (res.status === 401 || /bad credentials|token.*expired|revoked/i.test(body)) {
+      await markGitHubConnectionExpired(ctx.db, ctx.userId);
+      throw new Error('github_auth_invalid: the GitHub authorization is no longer valid. Ask the user to reconnect GitHub in Connections, then retry.');
+    }
+    throw new Error(`GitHub API 403: ${body.slice(0, 200)}`);
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`GitHub API ${res.status}: ${body.slice(0, 200)}`);
@@ -31,7 +54,7 @@ async function githubFetch(ctx: ToolContext, path: string, init?: RequestInit): 
 
 // §17 read/write are separate scopes and separate tools. Connecting GitHub grants read only.
 const githubListIssues: Tool = {
-  id: 'github.list_issues',
+  id: 'github_list_issues',
   description: 'List issues assigned to the authenticated user (§17)',
   inputSchema: { type: 'object', properties: { state: { type: 'string', enum: ['open', 'closed', 'all'] }, repo: { type: 'string' } } },
   scope: 'github.issues.read',
@@ -51,7 +74,7 @@ const githubListIssues: Tool = {
 };
 
 const githubCreateIssue: Tool = {
-  id: 'github.create_issue',
+  id: 'github_create_issue',
   description: 'Create an issue in a repository (§17)',
   inputSchema: {
     type: 'object',
@@ -72,7 +95,7 @@ const githubCreateIssue: Tool = {
 };
 
 const githubListPullRequests: Tool = {
-  id: 'github.list_pull_requests',
+  id: 'github_list_pull_requests',
   description: 'List pull requests in a repository (§17)',
   inputSchema: {
     type: 'object',
@@ -90,7 +113,7 @@ const githubListPullRequests: Tool = {
 };
 
 const githubGetIssue: Tool = {
-  id: 'github.get_issue',
+  id: 'github_get_issue',
   description: 'Get a specific issue with its details and comments (§17)',
   inputSchema: {
     type: 'object',
@@ -111,7 +134,7 @@ const githubGetIssue: Tool = {
 };
 
 const githubCommentOnIssue: Tool = {
-  id: 'github.comment_on_issue',
+  id: 'github_comment_on_issue',
   description: 'Post a comment on an issue (§17)',
   inputSchema: {
     type: 'object',
@@ -132,7 +155,7 @@ const githubCommentOnIssue: Tool = {
 };
 
 const githubListRepositories: Tool = {
-  id: 'github.list_repositories',
+  id: 'github_list_repositories',
   description: 'List repositories the user has access to (§17)',
   inputSchema: { type: 'object', properties: { sort: { type: 'string', enum: ['updated', 'created', 'pushed', 'full_name'] }, per_page: { type: 'number' } } },
   scope: 'github.repos.read',
@@ -146,7 +169,7 @@ const githubListRepositories: Tool = {
 };
 
 const githubGetNotifications: Tool = {
-  id: 'github.get_notifications',
+  id: 'github_get_notifications',
   description: 'Get unread notifications for the authenticated user (§17)',
   inputSchema: { type: 'object', properties: { all: { type: 'boolean' } } },
   scope: 'github.repos.read',
@@ -164,7 +187,7 @@ const githubGetNotifications: Tool = {
 // Live via Exa Search API (server key, no per-user OAuth — information retrieval needs none).
 // ponytail: fetch is stdlib; no SDK to own.
 const webSearch: Tool = {
-  id: 'web.search',
+  id: 'web_search',
   description: 'Search the web for information (§40)',
   inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
   scope: 'web.search',
@@ -188,19 +211,214 @@ const webSearch: Tool = {
   },
 };
 
+// §18 Google Calendar: read tools for chat, event creation approval-gated (§36).
+async function calendarFetch(ctx: ToolContext, path: string, init?: RequestInit, retried = false): Promise<unknown> {
+  const token = await getCalendarAccessToken(ctx.db, ctx.userId, { forceRefresh: retried });
+  if (!token) {
+    if (retried) await markCalendarConnectionExpired(ctx.db, ctx.userId);
+    throw new Error(
+      retried
+        ? 'calendar_auth_invalid: the Calendar authorization is no longer valid. Ask the user to reconnect Calendar in Connections, then retry.'
+        : 'calendar_not_connected',
+    );
+  }
+  const res = await fetch(`${CALENDAR_API}${path}`, {
+    ...init,
+    headers: { Authorization: `Bearer ${token}`, ...init?.headers },
+  });
+  if (res.status === 401 && !retried) return calendarFetch(ctx, path, init, true);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Calendar API ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+const calendarListEvents: Tool = {
+  id: 'calendar_list_events',
+  description: 'List upcoming Google Calendar events, optionally within a time range (§18)',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      timeMin: { type: 'string', description: 'ISO start, e.g. 2026-09-15T00:00:00Z (default: now)' },
+      timeMax: { type: 'string', description: 'ISO end' },
+      maxResults: { type: 'number', description: '1-50, default 10' },
+      query: { type: 'string', description: 'Free-text filter' },
+    },
+  },
+  scope: 'calendar.read',
+  isWrite: false,
+  approval: 'never',
+  execute: async (input, ctx) => {
+    const { timeMin, timeMax, maxResults, query } = (input ?? {}) as Record<string, string | number | undefined>;
+    const params = new URLSearchParams({
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      maxResults: String(Math.min(50, Math.max(1, Number(maxResults) || 10))),
+      timeMin: typeof timeMin === 'string' && timeMin ? timeMin : new Date().toISOString(),
+    });
+    if (typeof timeMax === 'string' && timeMax) params.set('timeMax', timeMax);
+    if (typeof query === 'string' && query) params.set('q', query);
+    const body = (await calendarFetch(ctx, `/calendars/primary/events?${params}`)) as { items?: unknown[] };
+    return { events: body.items ?? [] };
+  },
+};
+
+const calendarCreateEvent: Tool = {
+  id: 'calendar_create_event',
+  description: 'Create a Google Calendar event (§18 write — always requires human approval)',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      summary: { type: 'string' },
+      start: { type: 'string', description: 'ISO date-time or date' },
+      end: { type: 'string' },
+      description: { type: 'string' },
+      location: { type: 'string' },
+    },
+    required: ['summary', 'start', 'end'],
+  },
+  scope: 'calendar.write',
+  isWrite: true,
+  approval: 'always',
+  execute: async (input, ctx) => {
+    const { summary, start, end, description, location } = input as Record<string, string | undefined>;
+    if (!summary || !start || !end) throw new Error('invalid_input: summary, start and end are required');
+    return calendarFetch(ctx, '/calendars/primary/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        summary,
+        ...(description ? { description } : {}),
+        ...(location ? { location } : {}),
+        start: { dateTime: start },
+        end: { dateTime: end },
+      }),
+    });
+  },
+};
+
+// §18/§27 LeetCode: server-keyed read tools (no OAuth — public profile data).
+// The wrapper has a public rate limit, so tools stay few and results are cached
+// in integrations/leetcode.ts. If the wrapper is down the tool reports
+// 'leetcode_unavailable' and the model tells the user (§19).
+const leetcodeScope = 'leetcode.read';
+const usernameSchema = { type: 'object', properties: { username: { type: 'string', description: 'LeetCode username, e.g. alfaarghya' } }, required: ['username'] };
+
+const leetcodeGetProfile: Tool = {
+  id: 'leetcode_get_profile',
+  description: 'Get a LeetCode user profile: real name, ranking, reputation, country, school, skills (§18)',
+  inputSchema: usernameSchema,
+  scope: leetcodeScope,
+  isWrite: false,
+  approval: 'never',
+  execute: async (input) => getProfile(assertUsername((input as { username?: unknown }).username)),
+};
+
+const leetcodeGetSolved: Tool = {
+  id: 'leetcode_get_solved',
+  description: 'Get a LeetCode user solved-problem counts by difficulty, and totals (§18)',
+  inputSchema: usernameSchema,
+  scope: leetcodeScope,
+  isWrite: false,
+  approval: 'never',
+  execute: async (input) => getSolved(assertUsername((input as { username?: unknown }).username)),
+};
+
+const leetcodeGetRecentSubmissions: Tool = {
+  id: 'leetcode_get_recent_submissions',
+  description: 'Get a LeetCode user most recent accepted/rejected submissions (§18)',
+  inputSchema: {
+    type: 'object',
+    properties: { username: { type: 'string' }, limit: { type: 'number', description: '1-20, default 10' } },
+    required: ['username'],
+  },
+  scope: leetcodeScope,
+  isWrite: false,
+  approval: 'never',
+  execute: async (input) => {
+    const { username, limit } = input as { username?: unknown; limit?: unknown };
+    return getRecentSubmissions(assertUsername(username), typeof limit === 'number' ? limit : 10);
+  },
+};
+
+const leetcodeGetContestHistory: Tool = {
+  id: 'leetcode_get_contest_history',
+  description: 'Get a LeetCode user contest ranking history and attendance (§18)',
+  inputSchema: usernameSchema,
+  scope: leetcodeScope,
+  isWrite: false,
+  approval: 'never',
+  execute: async (input) => getContestHistory(assertUsername((input as { username?: unknown }).username)),
+};
+
+const leetcodeDailyChallenge: Tool = {
+  id: 'leetcode_daily_challenge',
+  description: 'Get the LeetCode problem of the day with its statement and difficulty (§18)',
+  inputSchema: { type: 'object', properties: {} },
+  scope: leetcodeScope,
+  isWrite: false,
+  approval: 'never',
+  execute: async () => getDailyChallenge(),
+};
+
+const leetcodeSearchProblems: Tool = {
+  id: 'leetcode_search_problems',
+  description: 'Search LeetCode problems by topic tags and/or difficulty (§18)',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      tags: { type: 'string', description: 'space or + separated tags, e.g. "array dynamic-programming"' },
+      difficulty: { type: 'string', enum: ['EASY', 'MEDIUM', 'HARD'] },
+      limit: { type: 'number', description: '1-50, default 20' },
+      skip: { type: 'number' },
+    },
+  },
+  scope: leetcodeScope,
+  isWrite: false,
+  approval: 'never',
+  execute: async (input) => {
+    const { tags, difficulty, limit, skip } = (input ?? {}) as { tags?: string; difficulty?: string; limit?: number; skip?: number };
+    return searchProblems({ tags, difficulty, limit, skip });
+  },
+};
+
+const leetcodeGetProblem: Tool = {
+  id: 'leetcode_get_problem',
+  description: 'Get one LeetCode problem by titleSlug (e.g. two-sum): statement, tags, difficulty (§18)',
+  inputSchema: { type: 'object', properties: { titleSlug: { type: 'string' } }, required: ['titleSlug'] },
+  scope: leetcodeScope,
+  isWrite: false,
+  approval: 'never',
+  execute: async (input) => getProblem(String((input as { titleSlug?: unknown }).titleSlug ?? '')),
+};
+
 /**
  * §17 Gmail fetch helper. Access token auto-refreshes in place (§38).
+ * A 401 forces one refresh + retry: the access token may have been revoked
+ * server-side between refreshes, and losing the reply to that is avoidable.
  * §46: token is never stored in logs or step metadata.
  */
-async function gmailFetch(ctx: ToolContext, path: string, init?: RequestInit): Promise<unknown> {
-  const token = await getGmailAccessToken(ctx.db, ctx.userId);
-  if (!token) throw new Error('gmail_not_connected');
+async function gmailFetch(ctx: ToolContext, path: string, init?: RequestInit, retried = false): Promise<unknown> {
+  const token = await getGmailAccessToken(ctx.db, ctx.userId, { forceRefresh: retried });
+  if (!token) {
+    if (retried) await markGmailConnectionExpired(ctx.db, ctx.userId);
+    throw new Error(
+      retried
+        ? 'gmail_auth_invalid: the Gmail authorization is no longer valid. Ask the user to reconnect Gmail in Connections, then retry.'
+        : 'gmail_not_connected',
+    );
+  }
   const res = await fetch(`${GMAIL_API}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${token}`, ...init?.headers },
   });
+  if (res.status === 401 && !retried) return gmailFetch(ctx, path, init, true);
   if (!res.ok) {
     const body = await res.text().catch(() => '');
+    if (res.status === 403 && /insufficient|scope/i.test(body)) {
+      throw new Error('gmail_scope_missing: the Gmail connection does not grant this access. Ask the user to reconnect Gmail and approve all requested permissions.');
+    }
     throw new Error(`Gmail API ${res.status}: ${body.slice(0, 200)}`);
   }
   return res.json();
@@ -245,7 +463,7 @@ function extractGmailBody(payload?: GmailPayload): string {
 
 // Level 1 native: gmail read tools are chat-safe; send is write-gated (§17/§36).
 const gmailListMessages: Tool = {
-  id: 'gmail.list_messages',
+  id: 'gmail_list_messages',
   description: 'List recent Gmail messages, optionally filtered by Gmail search query (§17)',
   inputSchema: {
     type: 'object',
@@ -287,7 +505,7 @@ const gmailListMessages: Tool = {
 };
 
 const gmailGetMessage: Tool = {
-  id: 'gmail.get_message',
+  id: 'gmail_get_message',
   description: 'Get a full Gmail message by id, with decoded body text (§17)',
   inputSchema: {
     type: 'object',
@@ -317,7 +535,7 @@ const gmailGetMessage: Tool = {
 };
 
 const gmailSendMessage: Tool = {
-  id: 'gmail.send_message',
+  id: 'gmail_send_message',
   description: 'Send an email via Gmail (§17 write — always requires human approval)',
   inputSchema: {
     type: 'object',
@@ -366,8 +584,20 @@ export const toolRegistry = new Map<string, Tool>(
     githubGetIssue, githubCommentOnIssue, githubListRepositories,
     githubGetNotifications, webSearch,
     gmailListMessages, gmailGetMessage, gmailSendMessage,
+    leetcodeGetProfile, leetcodeGetSolved, leetcodeGetRecentSubmissions,
+    leetcodeGetContestHistory, leetcodeDailyChallenge, leetcodeSearchProblems,
+    leetcodeGetProblem,
+    calendarListEvents, calendarCreateEvent,
   ].map((t) => [t.id, t]),
 );
+
+/**
+ * §40/§18: tools that run on the backend's own keys — no per-user OAuth exists
+ * or is needed, so the authorization gate must not demand a Connection.
+ */
+export function isServerKeyedTool(toolId: string): boolean {
+  return toolId.startsWith('web_') || toolId.startsWith('leetcode_');
+}
 
 /** §15: attach to the Gemini request as function declarations. */
 export function toToolDefs(tools: Tool[]) {

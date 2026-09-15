@@ -28,6 +28,7 @@ data class StreamChunk(
   val code: String? = null,
   val retryable: Boolean? = null,
   @SerialName("interactionId") val interactionId: String? = null,
+  @SerialName("label") val label: String? = null,
 )
 
 @Serializable private data class StreamRequest(
@@ -91,13 +92,19 @@ interface NovaApi {
   suspend fun register(@retrofit2.http.Body body: LoginRequest): AuthResponse
 
   @retrofit2.http.GET("/v1/conversations")
-  suspend fun conversations(): ConversationsResponse
+  suspend fun conversations(
+    @retrofit2.http.Query("limit") limit: Int = 50,
+    @retrofit2.http.Query("offset") offset: Int = 0,
+  ): ConversationsResponse
 
   @retrofit2.http.POST("/v1/conversations")
   suspend fun createConversation(): ConversationDto
 
   @retrofit2.http.GET("/v1/conversations/{id}")
   suspend fun conversation(@retrofit2.http.Path("id") id: String): ConversationDetailDto
+
+  @retrofit2.http.DELETE("/v1/conversations/{id}")
+  suspend fun deleteConversation(@retrofit2.http.Path("id") id: String): OkResponse
 
   @retrofit2.http.GET("/v1/models")
   suspend fun models(): ModelsResponse
@@ -168,6 +175,17 @@ interface NovaApi {
 
   @retrofit2.http.DELETE("/v1/connections/gmail")
   suspend fun disconnectGmail(): OkResponse
+
+  @retrofit2.http.GET("/v1/connections/calendar/authorize")
+  suspend fun calendarAuthorize(): GmailAuthorizeResponse
+
+  // §42 @plugin mention picker
+  @retrofit2.http.GET("/v1/plugins")
+  suspend fun plugins(): PluginsResponse
+
+  // §38 provider catalogue — the Connections screen renders from this single call.
+  @retrofit2.http.GET("/v1/connections/providers")
+  suspend fun connectionProviders(): ConnectionProvidersResponse
 }
 
 // Mirrors backend StoredFile (metadata only — bytes stay server-side, §46).
@@ -178,7 +196,7 @@ interface NovaApi {
 
 @Serializable data class LoginRequest(val email: String, val password: String)
 @Serializable data class AuthResponse(val token: String)
-@Serializable data class ConversationsResponse(val conversations: List<ConversationDto>)
+@Serializable data class ConversationsResponse(val conversations: List<ConversationDto>, val total: Int = 0, val hasMore: Boolean = false)
 @Serializable data class MessageDto(val id: String = "", val role: String, val content: String, val attachments: List<AttachmentInfo> = emptyList())
 @Serializable data class AttachmentInfo(val id: String, val filename: String, val mime: String, val size: Long = 0)
 @Serializable data class ConversationDetailDto(
@@ -232,3 +250,11 @@ interface NovaApi {
 @Serializable data class GitHubStatusResponse(val connected: Boolean, val login: String? = null, val scopes: List<String> = emptyList())
 @Serializable data class GmailAuthorizeResponse(val url: String, val state: String)
 @Serializable data class GmailStatusResponse(val connected: Boolean, val login: String? = null, val scopes: List<String> = emptyList())
+
+// §42 plugin catalogue for the @ mention picker.
+@Serializable data class PluginDto(val id: String, val name: String, val blurb: String, val requires: String? = null, val ready: Boolean = false)
+@Serializable data class PluginsResponse(val plugins: List<PluginDto> = emptyList())
+
+// §38 provider catalogue (backend-owned; includes availability state).
+@Serializable data class ProviderDto(val id: String, val name: String, val blurb: String, val login: String? = null, val state: String)
+@Serializable data class ConnectionProvidersResponse(val providers: List<ProviderDto> = emptyList())

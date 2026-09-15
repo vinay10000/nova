@@ -431,10 +431,10 @@ Order: **GitHub → Gmail → Google Calendar → Slack → Notion**, then X/Wha
 
 ### Phase 6 — Browser agents (§55) — 1.5 weeks
 
-- `BrowserProvider` (§23): **Playwright first** (deterministic, cheap, locally testable), then
-  Browserbase, then Cloudflare Browser Run — selected by config, never by call-site branching.
-- **Stagehand** (§24) for NL-driven tasks; deterministic Playwright when a workflow is stable (§24's
-  own rule). Session persistence and browser task history (§55).
+- `BrowserProvider` (§23): **Browserless.io and Browserbase** are the chosen providers —
+  Browserless for deterministic scrape/automation sessions, Browserbase (+ Stagehand, §24)
+  for NL-driven agent tasks — selected by config, never by call-site branching.
+- Session persistence and browser task history (§55).
 - §41: prefer APIs; browser only where unavailable **and permitted**.
 - Note the strategic catch: browser agents inherit the *user's* session, so this phase is where
   credential-handling risk peaks — sessions are scoped per user, never shared across tenants, and

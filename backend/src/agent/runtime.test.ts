@@ -17,7 +17,7 @@ function fakeProvider(calls: { toolId: string; args?: unknown }[], text = 'done'
   };
 }
 
-const agent = { id: 'a1', userId: 'u1', goal: 'g', instructions: 'i', tools: ['web.search'], permissions: ['web.search'] };
+const agent = { id: 'a1', userId: 'u1', goal: 'g', instructions: 'i', tools: ['web_search'], permissions: ['web_search'] };
 // gate needs only the connection lookup for non-web tools; web.* is server-keyed.
 const db = { connection: { findFirst: async () => null } } as never;
 
@@ -30,17 +30,17 @@ const db = { connection: { findFirst: async () => null } } as never;
 
 // 2. approval suspend: write tool with no channel suspends instead of executing.
 {
-  const ai = fakeProvider([{ toolId: 'github.create_issue', args: { title: 't' } }]);
-  const wide = { ...agent, tools: ['github.create_issue'], permissions: ['github.issues.write'] };
+  const ai = fakeProvider([{ toolId: 'github_create_issue', args: { title: 't' } }]);
+  const wide = { ...agent, tools: ['github_create_issue'], permissions: ['github.issues.write'] };
   const dbConn = { connection: { findFirst: async () => ({ status: 'connected' }) } } as never;
   const r = await runAgentLoop({ ai, db: dbConn, agent: wide });
   assert.ok(r.suspended, 'write must suspend, not execute');
-  assert.equal(r.suspended.toolId, 'github.create_issue');
+  assert.equal(r.suspended.toolId, 'github_create_issue');
 }
 
 // 3. iteration cap: a tool that always calls again stops at MAX_TOOL_STEPS.
 {
-  const calls = Array.from({ length: MAX_TOOL_STEPS + 5 }, () => ({ toolId: 'web.search', args: { query: 'x' } }));
+  const calls = Array.from({ length: MAX_TOOL_STEPS + 5 }, () => ({ toolId: 'web_search', args: { query: 'x' } }));
   // web.search would call Exa — instead point at an unknown tool that denies fast.
   const denyCalls = Array.from({ length: MAX_TOOL_STEPS + 5 }, () => ({ toolId: 'nope.tool' }));
   const ai = fakeProvider(denyCalls, 'unreached');

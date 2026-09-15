@@ -179,6 +179,48 @@ export async function disconnectGitHub(
 }
 
 /**
+ * §38/§17: The stored token stopped working (401/403 — revoked, expired or
+ * reset). Mark the connection so the UI stops claiming "Connected" and asks the
+ * user to reconnect, instead of every tool call failing silently.
+ */
+export async function markGitHubConnectionExpired(
+  db: PrismaClient,
+  userId: string,
+): Promise<void> {
+  await db.connection
+    .updateMany({ where: { userId, provider: 'github' }, data: { status: 'expired' } })
+    .catch(() => {});
+}
+
+/**
+ * §38: Live health check — is the stored token still accepted by GitHub?
+ * Used by GET /v1/connections/github/health and the Connections screen.
+ */
+export async function verifyGitHubConnection(
+  db: PrismaClient,
+  userId: string,
+): Promise<{ connected: boolean; ok: boolean; login: string | null }> {
+  const conn = await db.connection.findFirst({
+    where: { userId, provider: 'github' },
+    select: { status: true, providerLogin: true },
+  });
+  const token = await getGitHubToken(db, userId);
+  if (!token) return { connected: !!conn, ok: false, login: conn?.providerLogin ?? null };
+  try {
+    const user = await getGitHubUser(token);
+    if (conn && conn.status !== 'connected') {
+      await db.connection
+        .updateMany({ where: { userId, provider: 'github' }, data: { status: 'connected', providerLogin: user.login } })
+        .catch(() => {});
+    }
+    return { connected: true, ok: true, login: user.login };
+  } catch {
+    await markGitHubConnectionExpired(db, userId);
+    return { connected: true, ok: false, login: conn?.providerLogin ?? null };
+  }
+}
+
+/**
  * Check if a user's GitHub connection is valid and has the required scopes.
  */
 export async function hasGitHubScope(

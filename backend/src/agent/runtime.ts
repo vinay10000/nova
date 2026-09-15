@@ -1,7 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import type { AIProvider } from '../ai/AIProvider.js';
 import type { FunctionResultInput } from '../ai/GeminiProvider.js';
-import { toolRegistry, toToolDefs } from '../tools/registry.js';
+import { toolRegistry, toToolDefs, isServerKeyedTool } from '../tools/registry.js';
 import { runToolWithSafety, type ToolOutcome } from '../tools/Tool.js';
 
 // §52 agent runtime: the explicit tool loop (no auto-function-calling — §47 gates
@@ -45,10 +45,13 @@ export async function gateToolCall(
   const tool = toolRegistry.get(toolId);
   const toolIds = Array.isArray(agent.tools) ? (agent.tools as unknown[]) : [];
   const scopes = Array.isArray(agent.permissions) ? (agent.permissions as string[]) : [];
-  // Server-keyed tools (information retrieval, §40) run on the backend's own key —
-  // no per-user OAuth exists or is needed. Everything else needs a live Connection.
-  const serverKeyed = toolId.startsWith('web.');
-  const provider = toolId.split('.')[0]!;
+  // Server-keyed tools (information retrieval, §40; LeetCode, §18) run on the
+  // backend's own key — no per-user OAuth exists or is needed. Everything else
+  // needs a live Connection; 'expired' rows are deliberately NOT accepted here
+  // so a revoked token denies up front with a reconnect hint instead of failing
+  // mid-run.
+  const serverKeyed = isServerKeyedTool(toolId);
+  const provider = toolId.split('_')[0]!;
   const conn = serverKeyed || !tool
     ? null
     : await db.connection.findFirst({ where: { userId: agent.userId, provider, status: 'connected' } });

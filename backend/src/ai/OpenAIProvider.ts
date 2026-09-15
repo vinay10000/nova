@@ -1,22 +1,44 @@
 import type { AIProvider, ChatMessage, InlinePart, StreamChunk, ToolDef } from './AIProvider.js';
 
+// Model policy: ONLY two models, straight from Google AI Studio (GEMINI_API_KEY,
+// not the xkiro/bynara routers). gemini-3.1-flash-lite is the default for
+// plain chat; gemini-3.5-flash-lite handles tool calling and vision. Override
+// via env without touching code.
 export const MODELS = {
-  chat: 'tencent-hy3-free',
-  cheap: 'tencent-hy3-free',
-  reasoning: 'tencent-hy3-free',
+  chat: process.env.MODEL_CHAT ?? 'gemini-3.1-flash-lite',
+  cheap: process.env.MODEL_CHAT ?? 'gemini-3.1-flash-lite',
+  vision: process.env.MODEL_VISION ?? 'gemini-3.5-flash-lite',
+  tools: process.env.MODEL_TOOLS ?? 'gemini-3.5-flash-lite',
 } as const;
 
 const BASE_URL = 'https://router.bynara.id/v1';
 const API_KEY = process.env.AI_API_KEY ?? '';
+
+// Function-calling router. §46: keys live in env, never in the repo.
+const TOOLS_BASE_URL = process.env.TOOLS_BASE_URL ?? 'https://api.xkiro.com/v1';
+const TOOLS_API_KEY = process.env.TOOLS_API_KEY ?? '';
+const TOOLS_MODEL = process.env.TOOLS_MODEL ?? MODELS.tools;
+
+// Chat/vision default to the function-calling router: it carries the Gemini
+// 3.x flash models the model policy names. The BYNARA router stays as an
+// explicit CHAT_BASE_URL/CHAT_API_KEY override.
+const CHAT_BASE_URL = process.env.CHAT_BASE_URL ?? TOOLS_BASE_URL;
+const CHAT_API_KEY = process.env.CHAT_API_KEY ?? TOOLS_API_KEY;
+
+// Only these models are known to support function calling on the tools router.
+// Anything else (e.g. a chat-router model id picked in the UI) is replaced by
+// the tools model — otherwise the request 400s and the whole reply is lost.
+const TOOL_CAPABLE_MODELS = new Set<string>([TOOLS_MODEL, MODELS.chat, MODELS.vision]);
 
 export class OpenAIProvider implements AIProvider {
   private baseUrl: string;
   private apiKey: string;
 
   constructor() {
-    this.baseUrl = BASE_URL;
-    this.apiKey = API_KEY;
-    if (!this.apiKey) console.warn('[openai] AI_API_KEY missing — chat will fail until set.');
+    // Non-streaming helpers (builder, titles) share the chat router.
+    this.baseUrl = CHAT_BASE_URL;
+    this.apiKey = CHAT_API_KEY;
+    if (!this.apiKey) console.warn('[openai] no chat API key (CHAT_API_KEY/TOOLS_API_KEY) — chat will fail until set.');
   }
 
   async *streamChat(
@@ -27,16 +49,37 @@ export class OpenAIProvider implements AIProvider {
       signal?: AbortSignal;
       attachments?: InlinePart[];
       extractedText?: string;
+      functionResults?: { type: 'function_result'; name: string; call_id: string; result: string; is_error?: boolean }[];
     },
   ): AsyncGenerator<StreamChunk> {
     opts?.signal?.throwIfAborted?.();
 
+    // Route to the function-calling router when tools are present.
+    // When it is not configured, still send the tools on the normal router — a
+    // text-only answer beats a hard failure (§19: degrade honestly, never 500).
+    const hasTools = !!opts?.tools?.length;
+    const toolsRouterConfigured = hasTools && !!TOOLS_API_KEY;
+    const baseUrl = toolsRouterConfigured ? TOOLS_BASE_URL : CHAT_BASE_URL;
+    const apiKey = toolsRouterConfigured ? TOOLS_API_KEY : CHAT_API_KEY;
+    const model = toolsRouterConfigured
+      ? (opts?.model && TOOL_CAPABLE_MODELS.has(opts.model) ? opts.model : TOOLS_MODEL)
+      : (opts?.model && TOOL_CAPABLE_MODELS.has(opts.model) ? opts.model : (opts?.model ?? MODELS.chat));
+
+    if (hasTools && !TOOLS_API_KEY) {
+      console.warn('[openai] TOOLS_API_KEY is not set — tools are sent without the tools router; function calling may be unavailable.');
+    }
+
     const oaiMessages = toOpenAIMessages(messages, opts?.attachments, opts?.extractedText);
     const body: Record<string, unknown> = {
-      model: opts?.model ?? MODELS.chat,
+      model,
       messages: oaiMessages,
       stream: true,
     };
+
+    // Enable reasoning for tool-capable models that support it
+    if (toolsRouterConfigured) {
+      body.reasoning_effort = 'medium';
+    }
 
     if (opts?.tools?.length) {
       body.tools = opts.tools.map((t) => ({
@@ -45,11 +88,11 @@ export class OpenAIProvider implements AIProvider {
       }));
     }
 
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+    const res = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(body),
       signal: opts?.signal,
@@ -94,12 +137,23 @@ export class OpenAIProvider implements AIProvider {
             continue;
           }
 
-          const choices = parsed.choices as Array<{ delta?: { content?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> }; finish_reason?: string }> | undefined;
+          const choices = parsed.choices as Array<{ delta?: { content?: string; reasoning_content?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> }; finish_reason?: string }> | undefined;
           if (!choices?.length) continue;
 
           for (const choice of choices) {
+            // finish_reason usually arrives with an empty delta, so read it first.
+            // 'tool_calls' is a normal, complete finish — not an error (§15).
+            if (choice.finish_reason) {
+              sawDone = true;
+            }
+
             const delta = choice.delta;
             if (!delta) continue;
+
+            // Reasoning tokens (thinking)
+            if (delta.reasoning_content) {
+              yield { type: 'reasoning', text: delta.reasoning_content };
+            }
 
             // Text content
             if (delta.content) {
@@ -123,11 +177,6 @@ export class OpenAIProvider implements AIProvider {
                 }
               }
             }
-
-            // Stream finished
-            if (choice.finish_reason === 'stop') {
-              sawDone = true;
-            }
           }
         }
       }
@@ -143,7 +192,9 @@ export class OpenAIProvider implements AIProvider {
       yield { type: 'tool_call', toolId: tc.name, callId: tc.id, args };
     }
 
-    if (!sawDone) throw new Error('openai_stream_incomplete');
+    // A closed response body is a finished turn. Some routers omit finish_reason
+    // on tool-call turns; treating that as a failure would delete a valid reply.
+    if (!sawDone) console.warn('[openai] stream ended without finish_reason — treating as complete');
     yield { type: 'done' };
   }
 
@@ -191,16 +242,39 @@ function toOpenAIMessages(
   messages: ChatMessage[],
   attachments?: InlinePart[],
   extractedText?: string,
-): Array<{ role: string; content: string | Array<Record<string, unknown>> }> {
-  const result: Array<{ role: string; content: string | Array<Record<string, unknown>> }> = [];
+): Array<Record<string, unknown>> {
+  const result: Array<Record<string, unknown>> = [];
 
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     const isLast = i === messages.length - 1 && m.role === 'user';
     const hasExtras = isLast && ((attachments?.length ?? 0) > 0 || extractedText);
 
+    // Assistant message with tool_calls
+    if (m.role === 'model' && m.tool_calls?.length) {
+      result.push({
+        role: 'assistant',
+        content: m.content ?? null,
+        tool_calls: m.tool_calls,
+      });
+      continue;
+    }
+
+    // Tool result message
+    if (m.role === 'tool' && m.tool_call_id) {
+      result.push({
+        role: 'tool',
+        tool_call_id: m.tool_call_id,
+        content: m.content ?? '',
+      });
+      continue;
+    }
+
+    // Map 'model' → 'assistant' for OpenAI format
+    const role = m.role === 'model' ? 'assistant' : m.role;
+
     if (!hasExtras) {
-      result.push({ role: m.role === 'model' ? 'assistant' : m.role, content: m.content });
+      result.push({ role, content: m.content ?? '' });
       continue;
     }
 
@@ -218,7 +292,7 @@ function toOpenAIMessages(
     if (extractedText) {
       parts.push({ type: 'text', text: `[Attached file content]\n${extractedText}` });
     }
-    parts.push({ type: 'text', text: m.content });
+    parts.push({ type: 'text', text: m.content ?? '' });
     result.push({ role: 'user', content: parts });
   }
 

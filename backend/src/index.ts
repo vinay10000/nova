@@ -6,7 +6,7 @@ import { createHash } from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { GoogleGenAI } from '@google/genai';
-import { OpenAIProvider, MODELS } from './ai/OpenAIProvider.js';
+import { GeminiProvider, MODELS } from './ai/GeminiProvider.js';
 import { createChatService, ConversationNotFoundError } from './services/chatService.js';
 import { executeAgent, scopesForTools } from './services/agentService.js';
 import { toolRegistry } from './tools/registry.js';
@@ -20,15 +20,26 @@ import {
   storeGitHubConnection,
   getGitHubUser,
   disconnectGitHub,
+  verifyGitHubConnection,
 } from './integrations/github.js';
 import {
   buildGmailAuthorizeUrl,
   exchangeCodeForGmailToken,
   storeGmailConnection,
   disconnectGmail,
+  verifyGmailConnection,
   GMAIL_SCOPES,
 } from './integrations/gmail.js';
-import { chatPlugins } from './services/chatPlugins.js';
+import {
+  buildCalendarAuthorizeUrl,
+  exchangeCalendarCode,
+  storeCalendarConnection,
+  disconnectCalendar,
+  getCalendarAccessToken,
+  markCalendarConnectionExpired,
+  CALENDAR_SCOPES,
+} from './integrations/googleCalendar.js';
+import { chatPlugins, pluginCatalog, connectedProviders } from './services/chatPlugins.js';
 
 const app = Fastify({ logger: true });
 
@@ -51,7 +62,7 @@ if (!process.env.AI_API_KEY) {
 
 // Prisma 7 requires a driver adapter; pg connects directly to Postgres.
 const db = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) });
-const ai = new OpenAIProvider();
+const ai = new GeminiProvider();
 const chat = createChatService(ai, prismaChatStore(db), prismaAttachmentSource(db), db);
 const files = createFileService(db);
 await app.register(multipart, { limits: { fileSize: MAX_FILE_BYTES } });
@@ -110,26 +121,80 @@ app.get('/v1/me', async (req, reply) => {
 
 // ---- §8 conversations --------------------------------------------------------
 
+// The sidebar and the All-chats screen both read this route, and pagination
+// makes it chatty. Two cheap protections keep scroll bursts off the DB:
+//   1. a short-lived per-user cache, invalidated on every mutation
+//   2. a per-user read budget (120 requests / 60s) answering 429 past that
+// ponytail: process-local Map — correct for one instance, which is what Vercel
+// gives us today. Move to Redis/Postgres if this ever scales horizontally.
+const convCache = new Map<string, { at: number; body: unknown }>();
+const CONV_CACHE_TTL_MS = 15_000;
+const CONV_CACHE_MAX = 300;
+
+function convCacheKey(userId: string, q: string, archived: string, take: number, skip: number): string {
+  return `${userId}|${q}|${archived}|${take}|${skip}`;
+}
+
+/** Drop every cached page for a user when a conversation changes. */
+function invalidateConvCache(userId: string): void {
+  for (const key of convCache.keys()) {
+    if (key.startsWith(`${userId}|`)) convCache.delete(key);
+  }
+}
+
+const convHits = new Map<string, number[]>();
+function convRateLimited(userId: string, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): boolean {
+  const now = Date.now();
+  const windowStart = now - 60_000;
+  const hits = (convHits.get(userId) ?? []).filter((t) => t > windowStart);
+  hits.push(now);
+  convHits.set(userId, hits);
+  if (hits.length > 120) {
+    reply.code(429).send({ error: 'rate_limited', retryable: true });
+    return true;
+  }
+  return false;
+}
+
 app.get('/v1/conversations', async (req, reply) => {
   const userId = await requireUser(req, reply);
   if (!userId) return reply;
-  const { q, archived } = req.query as { q?: string; archived?: string };
-  return {
-    conversations: await db.conversation.findMany({
-      where: {
-        userId,
-        archived: archived === 'true',
-        ...(q ? { title: { contains: q, mode: 'insensitive' as const } } : {}),
-      },
+  if (convRateLimited(userId, reply)) return reply;
+  const { q, archived, limit, offset } = req.query as { q?: string; archived?: string; limit?: string; offset?: string };
+  const take = Math.min(100, Math.max(1, parseInt(limit ?? '50', 10) || 50));
+  const skip = Math.max(0, parseInt(offset ?? '0', 10) || 0);
+  const key = convCacheKey(userId, q ?? '', archived === 'true' ? 'true' : 'false', take, skip);
+  const cached = convCache.get(key);
+  if (cached && Date.now() - cached.at < CONV_CACHE_TTL_MS) return cached.body;
+
+  const where = {
+    userId,
+    archived: archived === 'true',
+    ...(q ? { title: { contains: q, mode: 'insensitive' as const } } : {}),
+  };
+  const [conversations, total] = await Promise.all([
+    db.conversation.findMany({
+      where,
       orderBy: { updatedAt: 'desc' },
+      take,
+      skip,
       select: { id: true, title: true, archived: true, createdAt: true, updatedAt: true },
     }),
-  };
+    db.conversation.count({ where }),
+  ]);
+  const body = { conversations, total, hasMore: skip + take < total };
+  if (convCache.size >= CONV_CACHE_MAX) {
+    const oldest = convCache.keys().next().value;
+    if (oldest) convCache.delete(oldest);
+  }
+  convCache.set(key, { at: Date.now(), body });
+  return body;
 });
 
 app.post('/v1/conversations', async (req, reply) => {
   const userId = await requireUser(req, reply);
   if (!userId) return reply;
+  invalidateConvCache(userId);
   return db.conversation.create({ data: { userId }, select: { id: true, title: true } });
 });
 
@@ -159,6 +224,7 @@ app.patch('/v1/conversations/:id', async (req, reply) => {
   if (!body.success) return reply.code(400).send({ error: 'invalid_input' });
   const { count } = await db.conversation.updateMany({ where: { id, userId }, data: body.data });
   if (!count) return reply.code(404).send({ error: 'not_found' });
+  invalidateConvCache(userId);
   return { ok: true };
 });
 
@@ -168,6 +234,7 @@ app.delete('/v1/conversations/:id', async (req, reply) => {
   const { id } = req.params as { id: string };
   const { count } = await db.conversation.deleteMany({ where: { id, userId } });
   if (!count) return reply.code(404).send({ error: 'not_found' });
+  invalidateConvCache(userId);
   return { ok: true };
 });
 
@@ -260,11 +327,16 @@ app.post('/v1/chat/stream', async (req, reply) => {
     send({ type: 'error', code, retryable: code === 'upstream_error' });
   } finally {
     if (!reply.raw.writableEnded) reply.raw.end();
+    // The assistant message and the auto-title changed this conversation's
+    // updatedAt — the cached list would otherwise show a stale order.
+    invalidateConvCache(userId);
   }
   return;
 });
 
-app.get('/v1/models', async () => ({ models: Object.values(MODELS) }));
+app.get('/v1/models', async () => ({
+  models: [...new Set([MODELS.chat, MODELS.vision])].map((id) => ({ id })),
+}));
 
 // ---- §11 output: remote TTS via Gemini 2.5 Flash Native Audio Dialog, swappable with device TTS ----
 
@@ -535,11 +607,64 @@ app.get('/v1/tools', async () => ({
 }));
 
 // §42: Chat plugins — @mentions that activate tool-backed conversations.
-app.get('/v1/plugins', async () => ({
-  plugins: chatPlugins.map((p) => ({ id: p.id, name: p.name, tools: p.toolIds })),
-}));
+// Auth required: readiness depends on which providers this user has connected.
+app.get('/v1/plugins', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const connected = await connectedProviders(db, userId);
+  return { plugins: pluginCatalog(connected) };
+});
+
+const GITHUB_READ_SCOPES = ['read:user', 'repo', 'read:org'];
 
 // ---- §38 Connections: OAuth flow + status ------------------------------------
+
+// §19/§38: provider catalogue. The Connections screen renders from this single
+// call, and it tells the truth about what is actually available: a provider is
+// 'configured' when the backend holds its OAuth app credentials, and
+// 'not_configured' when it does not. No dead Connect buttons.
+const PROVIDER_CATALOG: { id: string; name: string; blurb: string; envKeys: string[]; scopes: string[] }[] = [
+  { id: 'github', name: 'GitHub', blurb: 'Repos, issues, pull requests, notifications', envKeys: ['GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET'], scopes: GITHUB_READ_SCOPES },
+  { id: 'gmail', name: 'Gmail', blurb: 'Search, read and summarize mail', envKeys: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'], scopes: GMAIL_SCOPES },
+  { id: 'calendar', name: 'Google Calendar', blurb: 'See what is coming up, by day and time', envKeys: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'], scopes: CALENDAR_SCOPES },
+  // Not built yet — listed so the screen can say so instead of pretending (§19).
+  { id: 'slack', name: 'Slack', blurb: 'Channel summaries, coming in a later phase', envKeys: ['SLACK_CLIENT_ID', 'SLACK_CLIENT_SECRET'], scopes: [] },
+  { id: 'notion', name: 'Notion', blurb: 'Pages and notes, coming in a later phase', envKeys: ['NOTION_CLIENT_ID', 'NOTION_CLIENT_SECRET'], scopes: [] },
+  { id: 'x', name: 'X', blurb: 'Mentions that matter, coming in a later phase', envKeys: ['X_CLIENT_ID', 'X_CLIENT_SECRET'], scopes: [] },
+];
+
+const IMPLEMENTED_PROVIDERS = new Set(['github', 'gmail', 'calendar']);
+
+// §38: providers the client can offer to connect, with live per-user state.
+app.get('/v1/connections/providers', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const rows = await db.connection.findMany({ where: { userId }, select: { provider: true, status: true, providerLogin: true } });
+  const byId = new Map(rows.map((r) => [r.provider, r]));
+  return {
+    providers: PROVIDER_CATALOG.map((p) => {
+      const conn = byId.get(p.id);
+      const configured = IMPLEMENTED_PROVIDERS.has(p.id) && p.envKeys.every((k) => !!process.env[k]);
+      const state = !IMPLEMENTED_PROVIDERS.has(p.id)
+        ? 'not_built'
+        : !configured
+          ? 'not_configured'
+          : conn?.status === 'connected'
+            ? 'connected'
+            : conn?.status === 'expired'
+              ? 'needs_reconnect'
+              : 'available';
+      return {
+        id: p.id,
+        name: p.name,
+        blurb: p.blurb,
+        scopes: p.scopes,
+        login: conn?.providerLogin ?? null,
+        state,
+      };
+    }),
+  };
+});
 
 // §38: list all connections for the authenticated user (no tokens exposed).
 app.get('/v1/connections', async (req, reply) => {
@@ -556,6 +681,9 @@ app.get('/v1/connections', async (req, reply) => {
 app.get('/v1/connections/github/authorize', async (req, reply) => {
   const userId = await requireUser(req, reply);
   if (!userId) return reply;
+  if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) {
+    return reply.code(409).send({ error: 'provider_not_configured', provider: 'github' });
+  }
   try {
     const { url, state, codeVerifier } = buildGitHubAuthorizeUrl(userId);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
@@ -576,10 +704,9 @@ app.get('/v1/connections/github/authorize', async (req, reply) => {
   }
 });
 
-const GITHUB_READ_SCOPES = ['read:user', 'repo', 'read:org'];
+// GitHub read scopes are declared with the provider catalogue above.
 
 // §38: GitHub OAuth callback — exchanges code for token, stores encrypted connection.
-// This is a backend-only endpoint that redirects to the app via deep link.
 app.get('/v1/connections/github/callback', async (req, reply) => {
   const { code, state } = req.query as { code?: string; state?: string };
   if (!code || !state) return reply.code(400).send({ error: 'missing_code_or_state' });
@@ -625,12 +752,36 @@ app.get('/v1/connections/github/status', async (req, reply) => {
   return { connected: conn?.status === 'connected', login: conn?.providerLogin ?? null, scopes: conn?.scopes ?? [] };
 });
 
+// §38: live health check — "Connected" in the UI must mean the token still
+// works. A revoked GitHub token used to look connected forever, and every
+// @github question silently failed. Now the app can ask.
+app.get('/v1/connections/:provider/health', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const { provider } = req.params as { provider: string };
+  if (provider === 'github') return verifyGitHubConnection(db, userId);
+  if (provider === 'gmail') return verifyGmailConnection(db, userId);
+  if (provider === 'calendar') {
+    const token = await getCalendarAccessToken(db, userId, { forceRefresh: true });
+    const conn = await db.connection.findFirst({ where: { userId, provider: 'calendar' }, select: { providerLogin: true } });
+    if (!token) {
+      if (conn) await markCalendarConnectionExpired(db, userId);
+      return { connected: !!conn, ok: false, login: conn?.providerLogin ?? null };
+    }
+    return { connected: true, ok: true, login: conn?.providerLogin ?? null };
+  }
+  return reply.code(404).send({ error: 'unknown_provider' });
+});
+
 // ---- §38 Connections: Gmail OAuth --------------------------------------------
 
 // §38: Start Gmail OAuth — returns the Google consent URL to redirect to.
 app.get('/v1/connections/gmail/authorize', async (req, reply) => {
   const userId = await requireUser(req, reply);
   if (!userId) return reply;
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+    return reply.code(409).send({ error: 'provider_not_configured', provider: 'gmail' });
+  }
   try {
     const { url, state, codeVerifier } = buildGmailAuthorizeUrl(userId);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
@@ -694,6 +845,74 @@ app.get('/v1/connections/gmail/status', async (req, reply) => {
   const conn = await db.connection.findFirst({
     where: { userId, provider: 'gmail' },
     select: { status: true, providerLogin: true, scopes: true, createdAt: true },
+  });
+  return { connected: conn?.status === 'connected', login: conn?.providerLogin ?? null, scopes: conn?.scopes ?? [] };
+});
+
+// ---- §38 Connections: Google Calendar OAuth ---------------------------------
+
+// §38: Start Calendar OAuth — same Google client as Gmail, calendar scopes.
+app.get('/v1/connections/calendar/authorize', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+    return reply.code(409).send({ error: 'provider_not_configured', provider: 'calendar' });
+  }
+  try {
+    const { url, state, codeVerifier } = buildCalendarAuthorizeUrl();
+    await db.oAuthState.create({
+      data: {
+        state,
+        userId,
+        provider: 'calendar',
+        codeVerifier,
+        scopes: CALENDAR_SCOPES.join(' '),
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
+    return { url, state };
+  } catch (err) {
+    req.log.error(err);
+    return reply.code(500).send({ error: 'calendar_oauth_config_error' });
+  }
+});
+
+app.get('/v1/connections/calendar/callback', async (req, reply) => {
+  const { code, state } = req.query as { code?: string; state?: string };
+  if (!code || !state) return reply.code(400).send({ error: 'missing_code_or_state' });
+  const stateRow = await db.oAuthState.findUnique({ where: { state } });
+  if (!stateRow) return reply.code(400).send({ error: 'invalid_state' });
+  if (stateRow.expiresAt < new Date()) {
+    await db.oAuthState.delete({ where: { state } });
+    return reply.code(400).send({ error: 'state_expired' });
+  }
+  try {
+    const tokens = await exchangeCalendarCode(code, stateRow.codeVerifier);
+    await storeCalendarConnection(db, stateRow.userId, tokens);
+    await db.oAuthState.delete({ where: { state } });
+    const deepLink = process.env.DEEP_LINK_SCHEME ?? 'nova';
+    return reply.redirect(`${deepLink}://connections/calendar/connected`);
+  } catch (err) {
+    req.log.error(err);
+    await db.oAuthState.delete({ where: { state } }).catch(() => {});
+    const msg = err instanceof Error ? err.message : '';
+    if (/refresh_token/.test(msg)) return reply.code(500).send({ error: 'calendar_refresh_token_missing' });
+    return reply.code(500).send({ error: 'calendar_token_exchange_failed' });
+  }
+});
+
+app.delete('/v1/connections/calendar', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  return { ok: await disconnectCalendar(db, userId) };
+});
+
+app.get('/v1/connections/calendar/status', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const conn = await db.connection.findFirst({
+    where: { userId, provider: 'calendar' },
+    select: { status: true, providerLogin: true, scopes: true },
   });
   return { connected: conn?.status === 'connected', login: conn?.providerLogin ?? null, scopes: conn?.scopes ?? [] };
 });

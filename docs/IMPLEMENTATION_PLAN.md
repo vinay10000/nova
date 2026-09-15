@@ -348,8 +348,9 @@ Then X, WhatsApp (Business API), Google Docs/Drive, LeetCode, other dev tools (�
 - [ ] Approvals (§36) + FCM push notifications with user-controlled preferences (§43).
 
 ### Phase 6 — Browser agents (§55)
-- [ ] `BrowserProvider` with three implementations (§23): **Cloudflare Quick Actions** (cheapest —
-      start here), Browserbase, Playwright (+ Stagehand for NL tasks, §24).
+- [ ] `BrowserProvider` with two implementations (§23): **Browserless.io** (deterministic
+      scrape/automation sessions — start here) and **Browserbase** (+ Stagehand for NL
+      tasks, §24). No Playwright/Cloudflare providers — both replaced by these two.
 - [ ] Browser task history; session persistence where appropriate.
 
 ### Phase 7 — Advanced agents (§56)

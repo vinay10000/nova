@@ -1,7 +1,11 @@
 // §2 — AI provider abstraction. Backend owns keys; APK never sees them (§46).
 export interface ChatMessage {
-  role: 'user' | 'model' | 'system';
-  content: string;
+  role: 'user' | 'model' | 'system' | 'assistant' | 'tool';
+  content: string | null;
+  /** Present on assistant messages that contain tool calls (OpenAI format). */
+  tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[];
+  /** Present on tool result messages, matching the tool_call id. */
+  tool_call_id?: string;
 }
 
 /** §9 multimodal: inline image/document block for the Gemini Interactions input. */
@@ -13,8 +17,11 @@ export interface InlinePart {
 // One chunk shape for chat AND agent runs, so the client has a single streaming path.
 export type StreamChunk =
   | { type: 'token'; text: string }
+  | { type: 'reasoning'; text: string }
   | { type: 'tool_call'; toolId: string; callId?: string; args?: unknown }
   | { type: 'step'; label: string }
+  /** §38/§47: actionable non-fatal notice — e.g. "reconnect github". */
+  | { type: 'notice'; code: 'reconnect' | 'retry' | 'plugin'; provider?: string; message?: string }
   | { type: 'approval'; approvalId: string; toolId: string; payload: unknown }
   | { type: 'error'; code: string; message?: string; retryable?: boolean }
   | { type: 'done'; interactionId?: string };

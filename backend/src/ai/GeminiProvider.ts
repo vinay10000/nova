@@ -1,14 +1,13 @@
 import { GoogleGenAI } from '@google/genai';
 import type { AIProvider, ChatMessage, InlinePart, StreamChunk, ToolDef } from './AIProvider.js';
 
-// Verified model IDs (ai.google.dev/gemini-api/docs/models). Chat-capable models only —
-// the model selector serves this list, so audio/image variants must not leak in.
-// TTS output = Gemini 2.5 Flash Native Audio Dialog (/v1/tts); STT = Android SpeechRecognizer.
-export const MODELS = {
-  chat: 'gemini-3.5-flash-lite',
-  cheap: 'gemini-3.5-flash-lite',
-  reasoning: 'gemini-3.1-pro-preview',
-} as const;
+import { MODELS } from './OpenAIProvider.js';
+
+export { MODELS };
+
+// Model policy: ONLY two models. gemini-3.1-flash-lite default; gemini-3.5-flash-lite
+// for tool calling and vision (see OpenAIProvider MODELS).
+
 
 // §2-§3 Gemini via backend only. Function calling is the primary tool bridge (§15).
 export class GeminiProvider implements AIProvider {
@@ -171,8 +170,8 @@ export interface FunctionResultInput {
  * + `mime_type`; document mime limited to application/pdf and text/csv.
  */
 function transcript(turns: ChatMessage[]): string {
-  if (turns.length === 1) return turns[0]!.content;
-  return turns.map((m) => `${m.role === 'model' ? 'Assistant' : 'User'}: ${m.content}`).join('\n\n');
+  if (turns.length === 1) return turns[0]!.content ?? '';
+  return turns.map((m) => `${m.role === 'model' ? 'Assistant' : 'User'}: ${m.content ?? ''}`).join('\n\n');
 }
 
 function buildInput(
@@ -191,7 +190,7 @@ function buildInput(
       ? { type: 'image', mime_type: a.mime, data: a.data }
       : { type: 'document', mime_type: a.mime, data: a.data });
   }
-  blocks.push({ type: 'text', text: last.content });
+  blocks.push({ type: 'text', text: last.content ?? '' });
   return blocks;
 }
 

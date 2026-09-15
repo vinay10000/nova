@@ -8,7 +8,7 @@ const mockDb = {} as ToolContext['db'];
 const ctx: ToolContext = { userId: 'u1', agentId: 'a1', permissions: ['github.issues.read'], db: mockDb };
 
 const readTool: Tool = {
-  id: 'github.list_issues',
+  id: 'github_list_issues',
   description: 'List issues',
   inputSchema: {},
   scope: 'github.issues.read',
@@ -17,7 +17,7 @@ const readTool: Tool = {
   execute: async () => ({ issues: 5 }),
 };
 
-const writeTool: Tool = { ...readTool, id: 'github.create_issue', scope: 'github.issues.write', isWrite: true };
+const writeTool: Tool = { ...readTool, id: 'github_create_issue', scope: 'github.issues.write', isWrite: true };
 const alwaysTool: Tool = { ...readTool, id: 'x.post', scope: 'github.issues.read', isWrite: true, approval: 'always' };
 
 const ok = { hasPermission: true, hasAuth: true };

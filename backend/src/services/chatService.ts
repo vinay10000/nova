@@ -1,6 +1,7 @@
 import type { AIProvider, ChatMessage, InlinePart, StreamChunk } from '../ai/AIProvider.js';
 import type { PrismaClient } from '@prisma/client';
-import { detectPlugin, pluginToolDefs, executePluginTool, MAX_PLUGIN_STEPS, type ChatPlugin } from './chatPlugins.js';
+import { detectPlugin, pluginToolDefs, executePluginTool, MAX_PLUGIN_STEPS, connectedProviders, isPluginUsable, type ChatPlugin } from './chatPlugins.js';
+import { MODELS } from '../ai/OpenAIProvider.js';
 
 export interface ChatStore {
   loadMessages(conversationId: string, userId: string): Promise<{ role: string; content: string }[]>;
@@ -64,14 +65,31 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
         if (f.status === 'extracted' && f.extractedText) extractedText = (extractedText ? extractedText + '\n\n' : '') + f.extractedText;
       }
 
-      // Auto-route image messages to stepfun-3.7-flash (vision-capable) when no explicit model is chosen.
+      // Auto-route image messages to the vision model when no explicit model is chosen.
+      // Tool calls are re-routed to the tools model inside the provider; images
+      // need the vision model here.
       const hasImage = inlineParts.some((p) => p.mime.startsWith('image/'));
-      const resolvedModel = hasImage && !model ? 'stepfun-3.7-flash' : model;
+      const resolvedModel = hasImage && !model ? MODELS.vision : model;
 
       // §42: detect @plugin mentions (e.g. @github, @gmail)
-      const pluginMatch = detectPlugin(message);
+      // The connected set decides whether a *keyword* match may route to a
+      // plugin; an explicit @mention always routes, so the user gets an honest
+      // "connect this first" answer instead of silence.
+      const connected = db ? await connectedProviders(db, userId) : undefined;
+      const pluginMatch = detectPlugin(message, connected);
       const activePlugin: ChatPlugin | null = pluginMatch?.plugin ?? null;
       const userQuery = pluginMatch?.cleanedMessage ?? message;
+      if (activePlugin) {
+        const ready = !connected || isPluginUsable(activePlugin, connected);
+        yield {
+          type: 'notice',
+          code: ready ? 'plugin' : 'reconnect',
+          provider: activePlugin.requires ?? activePlugin.id,
+          message: ready
+            ? activePlugin.name
+            : `${activePlugin.name} is not connected yet — connect it to get real data.`,
+        };
+      }
 
       // Build the message history for Gemini
       const chatHistory: ChatMessage[] = [
@@ -142,7 +160,7 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
         if (db) {
           const results: { type: 'function_result'; name: string; call_id: string; result: string; is_error?: boolean }[] = [];
           for (const tc of toolCalls) {
-            const { result, isError } = await executePluginTool(db, userId, tc.toolId, tc.args);
+            const { result, isError, reconnect, retryable } = await executePluginTool(db, userId, tc.toolId, tc.args);
             results.push({
               type: 'function_result',
               name: tc.toolId,
@@ -150,17 +168,42 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
               result,
               ...(isError ? { is_error: true } : {}),
             });
+            // §38/§47: tell the app what to do about it, not just the model.
+            if (reconnect) {
+              yield { type: 'notice', code: 'reconnect', provider: reconnect, message: `${reconnect} needs to be reconnected` };
+            } else if (retryable) {
+              yield { type: 'notice', code: 'retry', provider: tc.toolId.split('_')[0], message: 'upstream busy — retry shortly' };
+            }
           }
           pendingResults = results;
         }
 
         toolSteps++;
-        // Add assistant message with tool calls to history, then user message with results
-        // (OpenAI format requires this sequence for multi-turn tool use)
+        // Build proper OpenAI-format messages: assistant with tool_calls, then tool results
+        const assistantMsg: ChatMessage = {
+          role: 'model',
+          content: '',
+          tool_calls: toolCalls.map((tc) => ({
+            id: tc.callId,
+            type: 'function' as const,
+            function: { name: tc.toolId, arguments: JSON.stringify(tc.args) },
+          })),
+        };
+
+        const toolResultMsgs: ChatMessage[] = toolCalls.map((tc) => {
+          const res = pendingResults?.find((r) => r.call_id === tc.callId);
+          return {
+            role: 'tool' as const,
+            content: res?.is_error ? `Error: ${res.result}` : (res?.result ?? 'no result'),
+            tool_call_id: tc.callId,
+          };
+        });
+
         currentMessages = [
           ...currentMessages,
-          { role: 'model' as const, content: '' },
-          { role: 'user' as const, content: 'Here are the tool results. Summarize them for the user.' },
+          assistantMsg,
+          ...toolResultMsgs,
+          { role: 'user' as const, content: 'Tool results are above. Summarize them for the user concisely.' },
         ];
       }
 
