@@ -1,4 +1,4 @@
-import { app } from '../src/index.js';
+import { app } from '../dist/index.js';
 
 // Vercel serverless entry: hand the raw request to Fastify's http server.
 export default async function handler(req, res) {
