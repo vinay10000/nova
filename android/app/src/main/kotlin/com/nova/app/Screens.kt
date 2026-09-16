@@ -542,7 +542,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   LaunchedEffect(api) { vm.configureApi(api) }
   var conversations by remember { mutableStateOf<List<ConversationDto>>(emptyList()) }
   var convTotal by remember { mutableStateOf(0) }
-  var convHasMore by remember { mutableStateOf(true) }
+  var convHasMore by remember { mutableStateOf(false) }
   var convLoading by remember { mutableStateOf(false) }
   var models by remember { mutableStateOf<List<ModelDto>>(emptyList()) }
   var model by remember { mutableStateOf<String?>(null) }
@@ -564,7 +564,10 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
       convTotal = res.total
       convHasMore = res.hasMore
       offline = false
-    }.onFailure { offline = true }
+    }.onFailure {
+      offline = true
+      convHasMore = false
+    }
     convLoading = false
   }
   LaunchedEffect(Unit) {
@@ -572,7 +575,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     loadConversations(reset = true)
     runCatching {
       vm.setConversation(api.createConversation().id)
-    }.onFailure { offline = true }
+    }
   }
   val messages by vm.messages.collectAsState()
   val streamingMsg by vm.streamingMsg.collectAsState()
@@ -834,12 +837,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     }
 
     if (offline) {
-      Surface(color = scheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
+      Surface(color = scheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
         Text(
           "Offline. Showing what is cached. Reconnect to keep going.",
           modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
           style = MaterialTheme.typography.bodySmall,
-          color = scheme.onSurface,
+          color = scheme.onSurfaceVariant,
         )
       }
     }
@@ -1100,10 +1103,10 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           Surface(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
             shape = RoundedCornerShape(16.dp),
-            color = scheme.errorContainer,
+            color = scheme.surfaceVariant,
           ) {
             Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-              Text("That run failed ($code). ", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = scheme.onSurface)
+              Text("That run failed ($code). ", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
               TextButton(onClick = { vm.clearError(); vm.retry() }) { Text("Retry", color = scheme.primary) }
             }
           }
@@ -1622,7 +1625,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           total = res.total
           hasMore = res.hasMore
         }
-        .onFailure { error = "Unable to load chats" }
+        .onFailure { error = "Unable to load chats"; hasMore = false }
       loading = false
     }
   }
@@ -1775,7 +1778,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineMedium,
             color = when {
               connected -> scheme.primary
-              needsReconnect -> scheme.error
+              needsReconnect -> scheme.tertiary
               else -> scheme.onSurfaceVariant
             },
             modifier = Modifier.width(34.dp),
@@ -1797,7 +1800,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall,
               color = when {
                 connected -> scheme.secondary
-                needsReconnect -> scheme.error
+                needsReconnect -> scheme.tertiary
                 else -> scheme.onSurfaceVariant
               },
             )

@@ -67,6 +67,15 @@ const chat = createChatService(ai, prismaChatStore(db), prismaAttachmentSource(d
 const files = createFileService(db);
 await app.register(multipart, { limits: { fileSize: MAX_FILE_BYTES } });
 
+// Allow empty JSON bodies (Retrofit sends Content-Type: application/json with no body
+// on POST endpoints like createConversation).  The default parser rejects this.
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (_, rawBody, done) => {
+  const str = typeof rawBody === 'string' ? rawBody : rawBody.toString();
+  if (!str || str.length === 0) return done(null, {});
+  try { done(null, JSON.parse(str)); }
+  catch (err) { done(err as Error, undefined); }
+});
+
 app.get('/health', async () => ({ ok: true }));
 
 // ---- §29 auth ----------------------------------------------------------------

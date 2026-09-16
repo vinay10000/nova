@@ -44,8 +44,12 @@ export class GeminiProvider implements AIProvider {
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
     const turns = messages.filter((m) => m.role !== 'system');
 
+    // Guard against stale model ids saved by older clients (e.g. router-era
+    // 'qwen/...' ids) — they 404 the whole turn. Only known models pass.
+    const allowed = new Set<string>(Object.values(MODELS));
+    const model = opts?.model && allowed.has(opts.model) ? opts.model : MODELS.chat;
     const stream = (await this.client.interactions.create({
-      model: opts?.model ?? MODELS.chat,
+      model,
       input: opts?.functionResults?.length
         ? (opts.functionResults as unknown as Array<Record<string, unknown>>)
         : (buildInput(turns, opts?.attachments, opts?.extractedText) as string),
@@ -195,7 +199,9 @@ function buildInput(
 }
 
 function toToolDef(t: ToolDef) {
-  return { type: 'function' as const, function: { name: t.name, description: t.description, parameters: t.parameters } };
+  // Interactions API tool shape: fields at the top level, NOT nested under
+  // `function` (that is OpenAI format and 400s with "Unknown parameter 'function'").
+  return { type: 'function' as const, name: t.name, description: t.description, parameters: t.parameters };
 }
 
 function outputText(res: unknown): string {

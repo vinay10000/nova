@@ -29,8 +29,8 @@ console.log('probe user:', userId);
 // Copy the real user's encrypted connection blobs onto the probe user so the
 // live GitHub token (revoked) and Gmail token (valid) are exercised for real.
 const copied = await c.query(
-  `INSERT INTO "Connection" (id, "userId", provider, status, scopes, "providerLogin", "encryptedToken", "createdAt", "updatedAt")
-   SELECT gen_random_uuid()::text, $1, provider, status, scopes, "providerLogin", "encryptedToken", now(), now()
+  `INSERT INTO "Connection" (id, "userId", provider, status, scopes, "providerLogin", "encryptedToken", "createdAt")
+   SELECT gen_random_uuid()::text, $1, provider, status, scopes, "providerLogin", "encryptedToken", now()
    FROM "Connection" WHERE "userId" = (SELECT "userId" FROM "Connection" WHERE provider = 'github' ORDER BY "createdAt" ASC LIMIT 1)
    RETURNING provider, status`,
   [userId],

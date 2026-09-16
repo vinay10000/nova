@@ -11,17 +11,13 @@ export const MODELS = {
   tools: process.env.MODEL_TOOLS ?? 'gemini-3.5-flash-lite',
 } as const;
 
-const BASE_URL = 'https://router.bynara.id/v1';
-const API_KEY = process.env.AI_API_KEY ?? '';
-
-// Function-calling router. §46: keys live in env, never in the repo.
-const TOOLS_BASE_URL = process.env.TOOLS_BASE_URL ?? 'https://api.xkiro.com/v1';
-const TOOLS_API_KEY = process.env.TOOLS_API_KEY ?? '';
+// Function calling: the AI Studio OpenAI-compatible endpoint supports tools
+// natively, so chat and tools share one router. Keys live in env, never in the repo.
+const TOOLS_BASE_URL = process.env.TOOLS_BASE_URL ?? 'https://generativelanguage.googleapis.com/v1beta/openai';
+const TOOLS_API_KEY = process.env.TOOLS_API_KEY ?? process.env.GEMINI_API_KEY ?? '';
 const TOOLS_MODEL = process.env.TOOLS_MODEL ?? MODELS.tools;
 
-// Chat/vision default to the function-calling router: it carries the Gemini
-// 3.x flash models the model policy names. The BYNARA router stays as an
-// explicit CHAT_BASE_URL/CHAT_API_KEY override.
+// Chat/vision default to the same AI Studio endpoint.
 const CHAT_BASE_URL = process.env.CHAT_BASE_URL ?? TOOLS_BASE_URL;
 const CHAT_API_KEY = process.env.CHAT_API_KEY ?? TOOLS_API_KEY;
 
