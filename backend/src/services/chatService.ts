@@ -1,7 +1,7 @@
 import type { AIProvider, ChatMessage, InlinePart, StreamChunk } from '../ai/AIProvider.js';
 import type { PrismaClient } from '@prisma/client';
 import { detectPlugin, pluginToolDefs, executePluginTool, MAX_PLUGIN_STEPS, connectedProviders, isPluginUsable, type ChatPlugin } from './chatPlugins.js';
-import { MODELS } from '../ai/OpenAIProvider.js';
+import { MODELS } from '../ai/models.js';
 
 export interface ChatStore {
   loadMessages(conversationId: string, userId: string): Promise<{ role: string; content: string }[]>;

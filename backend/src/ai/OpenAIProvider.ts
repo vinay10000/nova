@@ -1,15 +1,8 @@
 import type { AIProvider, ChatMessage, InlinePart, StreamChunk, ToolDef } from './AIProvider.js';
+import { MODELS } from './models.js';
 
-// Model policy: ONLY two models, straight from Google AI Studio (GEMINI_API_KEY,
-// not the xkiro/bynara routers). gemini-3.1-flash-lite is the default for
-// plain chat; gemini-3.5-flash-lite handles tool calling and vision. Override
-// via env without touching code.
-export const MODELS = {
-  chat: process.env.MODEL_CHAT ?? 'gemini-3.1-flash-lite',
-  cheap: process.env.MODEL_CHAT ?? 'gemini-3.1-flash-lite',
-  vision: process.env.MODEL_VISION ?? 'gemini-3.5-flash-lite',
-  tools: process.env.MODEL_TOOLS ?? 'gemini-3.5-flash-lite',
-} as const;
+// Model policy lives in ./models.js (single source of truth, F1 fix).
+export { MODELS } from './models.js';
 
 // Function calling: the AI Studio OpenAI-compatible endpoint supports tools
 // natively, so chat and tools share one router. Keys live in env, never in the repo.

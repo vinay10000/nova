@@ -1,7 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import type { AIProvider, ChatMessage, InlinePart, StreamChunk, ToolDef } from './AIProvider.js';
 
-import { MODELS } from './OpenAIProvider.js';
+import { MODELS } from './models.js';
 
 export { MODELS };
 

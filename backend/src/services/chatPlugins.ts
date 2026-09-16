@@ -19,7 +19,7 @@ export interface ChatPlugin {
   /** System instruction appended to the conversation when this plugin is active */
   systemInstruction: string;
   /** Connection this plugin needs, or null when it runs on backend keys (§40). */
-  requires: 'github' | 'gmail' | 'calendar' | null;
+  requires: 'github' | 'gmail' | 'calendar' | 'drive' | 'vercel' | 'supabase' | null;
 }
 
 // §17: only read tools are auto-activated by @github in chat.
@@ -100,6 +100,56 @@ export const chatPlugins: ChatPlugin[] = [
       '(today, this week, or the range they asked for) and summarize in plain language with day and time. ' +
       'Do not create events in chat — say that creating an event needs an agent with approval. ' +
       'If the tool reports the connection is missing or invalid, tell the user to connect or reconnect Calendar.',
+  },
+  {
+    id: 'drive',
+    name: 'Drive',
+    blurb: 'Files and folders in Google Drive',
+    toolIds: ['drive_list'],
+    requires: 'drive',
+    systemInstruction:
+      'The user is asking about their Google Drive. Use drive_list to answer. Be concise. Never fabricate files — always call the tools. ' +
+      'If a tool reports Drive is not connected or authorization is invalid, tell the user plainly to connect Drive from the Connections screen.',
+  },
+  {
+    id: 'docs',
+    name: 'Docs',
+    blurb: 'Read and create Google Docs',
+    toolIds: ['drive_docs_get'],
+    requires: 'drive',
+    systemInstruction:
+      'The user is asking about Google Docs. Use drive_docs_get with the document id. Creating docs needs an agent with approval — say so in chat. ' +
+      'Never fabricate document content. On auth errors, tell the user to connect Drive from the Connections screen.',
+  },
+  {
+    id: 'sheets',
+    name: 'Sheets',
+    blurb: 'Read and append Google Sheets',
+    toolIds: ['drive_sheets_read'],
+    requires: 'drive',
+    systemInstruction:
+      'The user is asking about Google Sheets. Use drive_sheets_read with spreadsheetId and range (e.g. Sheet1!A1:D20). ' +
+      'Writing needs an agent with approval — say so in chat. Never fabricate cell values. On auth errors, tell the user to connect Drive.',
+  },
+  {
+    id: 'vercel',
+    name: 'Vercel',
+    blurb: 'Projects and deployments',
+    toolIds: ['vercel_list_projects', 'vercel_list_deployments'],
+    requires: 'vercel',
+    systemInstruction:
+      'The user is asking about Vercel. Use vercel_list_projects and vercel_list_deployments. Deploys/rollbacks need an agent with approval — say so in chat. ' +
+      'Never fabricate deployment states. On auth errors, tell the user to reconnect Vercel from the Connections screen.',
+  },
+  {
+    id: 'supabase',
+    name: 'Supabase',
+    blurb: 'Tables and rows in your project',
+    toolIds: ['supabase_list_tables', 'supabase_query_rows'],
+    requires: 'supabase',
+    systemInstruction:
+      'The user is asking about Supabase. Use supabase_list_tables then supabase_query_rows with a safe table name. ' +
+      'Inserts need an agent with approval — say so in chat. Never fabricate rows. On auth errors, tell the user to reconnect Supabase.',
   },
 ];
 
@@ -273,6 +323,26 @@ export function detectPlugin(
   }
   if (/\b(calendar|agenda|my (schedule|meetings?))\b/i.test(message)) {
     const plugin = usable('calendar');
+    if (plugin) return { plugin, cleanedMessage: message };
+  }
+  if (/\b(google docs?|docs? document)\b/i.test(message)) {
+    const plugin = usable('docs');
+    if (plugin) return { plugin, cleanedMessage: message };
+  }
+  if (/\b(google sheets?|spreadsheet)\b/i.test(message)) {
+    const plugin = usable('sheets');
+    if (plugin) return { plugin, cleanedMessage: message };
+  }
+  if (/\b(google drive|my drive|drive files?)\b/i.test(message)) {
+    const plugin = usable('drive');
+    if (plugin) return { plugin, cleanedMessage: message };
+  }
+  if (/\b(vercel|deployment(s)?|deploy preview)\b/i.test(message)) {
+    const plugin = usable('vercel');
+    if (plugin) return { plugin, cleanedMessage: message };
+  }
+  if (/\b(supabase|postgres rows?|db table)\b/i.test(message)) {
+    const plugin = usable('supabase');
     if (plugin) return { plugin, cleanedMessage: message };
   }
   return null;

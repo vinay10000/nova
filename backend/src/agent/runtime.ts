@@ -111,7 +111,9 @@ export async function runAgentLoop(opts: {
     let previousInteractionId: string | undefined;
     let results: FunctionResultInput[] | undefined;
     let output = '';
-    const basePrompt = `Goal: ${agent.goal}\nInstructions: ${agent.instructions}`;
+    // Exa web search is a first-class agent tool: the model must reach for it
+    // instead of guessing whenever facts may be current or external.
+    const basePrompt = `Goal: ${agent.goal}\nInstructions: ${agent.instructions}\nFor current or external facts, use the web_search tool (Exa) rather than guessing.`;
     // Accumulates tool results as plain text when chaining is rejected — the
     // next turn re-sends goal + results in one fresh user message.
     let freshText = '';

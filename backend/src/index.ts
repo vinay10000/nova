@@ -39,6 +39,16 @@ import {
   markCalendarConnectionExpired,
   CALENDAR_SCOPES,
 } from './integrations/googleCalendar.js';
+import {
+  buildDriveAuthorizeUrl,
+  exchangeDriveCode,
+  storeDriveConnection,
+  disconnectDrive,
+  verifyDriveConnection,
+  DRIVE_SCOPES,
+} from './integrations/googleDrive.js';
+import { storeVercelConnection, disconnectVercel } from './integrations/vercel.js';
+import { storeSupabaseConnection, disconnectSupabase } from './integrations/supabase.js';
 import { chatPlugins, pluginCatalog, connectedProviders } from './services/chatPlugins.js';
 
 const app = Fastify({ logger: true });
@@ -350,7 +360,9 @@ app.get('/v1/models', async () => ({
 // ---- §11 output: remote TTS via Gemini 2.5 Flash Native Audio Dialog, swappable with device TTS ----
 
 const GEMINI_TTS_MODEL = 'gemini-2.5-flash-preview-native-audio-dialog';
-const geminiTts = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
+// F5: chat runs on AI_API_KEY — TTS must accept the same key, not only the legacy name.
+const TTS_API_KEY = process.env.GEMINI_API_KEY ?? process.env.AI_API_KEY ?? '';
+const geminiTts = new GoogleGenAI({ apiKey: TTS_API_KEY });
 
 // Gemini native audio returns base64-encoded linear16 PCM at 24 kHz mono;
 // wrap a 44-byte WAV header so Android MediaPlayer can play it directly.
@@ -383,7 +395,7 @@ function ttsCacheKey(text: string): string {
 app.post('/v1/tts', async (req, reply) => {
   const userId = await requireUser(req, reply);
   if (!userId) return reply;
-  if (!process.env.GEMINI_API_KEY) return reply.code(503).send({ error: 'tts_unconfigured' });
+  if (!TTS_API_KEY) return reply.code(503).send({ error: 'tts_unconfigured' });
   const body = z.object({ text: z.string().min(1).max(4000) }).safeParse(req.body);
   if (!body.success) return reply.code(400).send({ error: 'invalid_input' });
 
@@ -636,13 +648,16 @@ const PROVIDER_CATALOG: { id: string; name: string; blurb: string; envKeys: stri
   { id: 'github', name: 'GitHub', blurb: 'Repos, issues, pull requests, notifications', envKeys: ['GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET'], scopes: GITHUB_READ_SCOPES },
   { id: 'gmail', name: 'Gmail', blurb: 'Search, read and summarize mail', envKeys: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'], scopes: GMAIL_SCOPES },
   { id: 'calendar', name: 'Google Calendar', blurb: 'See what is coming up, by day and time', envKeys: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'], scopes: CALENDAR_SCOPES },
+  { id: 'drive', name: 'Google Drive', blurb: 'Drive files plus Docs read/create and Sheets read/append', envKeys: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'], scopes: DRIVE_SCOPES },
+  { id: 'vercel', name: 'Vercel', blurb: 'Projects and deployments (paste a token)', envKeys: [], scopes: ['vercel.read', 'vercel.deploy'] },
+  { id: 'supabase', name: 'Supabase', blurb: 'Tables and rows (project ref + key)', envKeys: [], scopes: ['supabase.read', 'supabase.write'] },
   // Not built yet — listed so the screen can say so instead of pretending (§19).
   { id: 'slack', name: 'Slack', blurb: 'Channel summaries, coming in a later phase', envKeys: ['SLACK_CLIENT_ID', 'SLACK_CLIENT_SECRET'], scopes: [] },
   { id: 'notion', name: 'Notion', blurb: 'Pages and notes, coming in a later phase', envKeys: ['NOTION_CLIENT_ID', 'NOTION_CLIENT_SECRET'], scopes: [] },
   { id: 'x', name: 'X', blurb: 'Mentions that matter, coming in a later phase', envKeys: ['X_CLIENT_ID', 'X_CLIENT_SECRET'], scopes: [] },
 ];
 
-const IMPLEMENTED_PROVIDERS = new Set(['github', 'gmail', 'calendar']);
+const IMPLEMENTED_PROVIDERS = new Set(['github', 'gmail', 'calendar', 'drive', 'vercel', 'supabase']);
 
 // §38: providers the client can offer to connect, with live per-user state.
 app.get('/v1/connections/providers', async (req, reply) => {
@@ -770,6 +785,7 @@ app.get('/v1/connections/:provider/health', async (req, reply) => {
   const { provider } = req.params as { provider: string };
   if (provider === 'github') return verifyGitHubConnection(db, userId);
   if (provider === 'gmail') return verifyGmailConnection(db, userId);
+  if (provider === 'drive') return verifyDriveConnection(db, userId);
   if (provider === 'calendar') {
     const token = await getCalendarAccessToken(db, userId, { forceRefresh: true });
     const conn = await db.connection.findFirst({ where: { userId, provider: 'calendar' }, select: { providerLogin: true } });
@@ -924,6 +940,103 @@ app.get('/v1/connections/calendar/status', async (req, reply) => {
     select: { status: true, providerLogin: true, scopes: true },
   });
   return { connected: conn?.status === 'connected', login: conn?.providerLogin ?? null, scopes: conn?.scopes ?? [] };
+});
+
+// ---- F2: Drive OAuth (Docs + Sheets share this connection) -------------------
+app.get('/v1/connections/drive/authorize', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+    return reply.code(409).send({ error: 'provider_not_configured', provider: 'drive' });
+  }
+  try {
+    const { url, state, codeVerifier } = buildDriveAuthorizeUrl();
+    await db.oAuthState.create({ data: { state, userId, provider: 'drive', codeVerifier, scopes: DRIVE_SCOPES.join(' '), expiresAt: new Date(Date.now() + 10 * 60 * 1000) } });
+    return { url, state };
+  } catch (err) {
+    req.log.error(err);
+    return reply.code(500).send({ error: 'drive_oauth_config_error' });
+  }
+});
+
+app.get('/v1/connections/drive/callback', async (req, reply) => {
+  const { code, state } = req.query as { code?: string; state?: string };
+  if (!code || !state) return reply.code(400).send({ error: 'missing_code_or_state' });
+  const stateRow = await db.oAuthState.findUnique({ where: { state } });
+  if (!stateRow) return reply.code(400).send({ error: 'invalid_state' });
+  if (stateRow.expiresAt < new Date()) {
+    await db.oAuthState.delete({ where: { state } });
+    return reply.code(400).send({ error: 'state_expired' });
+  }
+  try {
+    const tokens = await exchangeDriveCode(code, stateRow.codeVerifier);
+    await storeDriveConnection(db, stateRow.userId, tokens);
+    await db.oAuthState.delete({ where: { state } });
+    const deepLink = process.env.DEEP_LINK_SCHEME ?? 'nova';
+    return reply.redirect(`${deepLink}://connections/drive/connected`);
+  } catch (err) {
+    req.log.error(err);
+    await db.oAuthState.delete({ where: { state } }).catch(() => {});
+    return reply.code(500).send({ error: 'drive_token_exchange_failed' });
+  }
+});
+
+app.delete('/v1/connections/drive', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  return { ok: await disconnectDrive(db, userId) };
+});
+
+app.get('/v1/connections/drive/status', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const conn = await db.connection.findFirst({ where: { userId, provider: 'drive' }, select: { status: true, providerLogin: true, scopes: true } });
+  return { connected: conn?.status === 'connected', login: conn?.providerLogin ?? null, scopes: conn?.scopes ?? [] };
+});
+
+// ---- F2: Vercel + Supabase are token-based (no OAuth round-trip) -------------
+app.post('/v1/connections/vercel', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const body = z.object({ token: z.string().min(8).max(500), login: z.string().max(200).optional() }).safeParse(req.body);
+  if (!body.success) return reply.code(400).send({ error: 'invalid_input' });
+  await storeVercelConnection(db, userId, body.data.token, body.data.login);
+  return { ok: true };
+});
+
+app.delete('/v1/connections/vercel', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  return { ok: await disconnectVercel(db, userId) };
+});
+
+app.get('/v1/connections/vercel/status', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const conn = await db.connection.findFirst({ where: { userId, provider: 'vercel' }, select: { status: true, providerLogin: true } });
+  return { connected: conn?.status === 'connected', login: conn?.providerLogin ?? null };
+});
+
+app.post('/v1/connections/supabase', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const body = z.object({ projectRef: z.string().min(1).max(100), key: z.string().min(20).max(2000) }).safeParse(req.body);
+  if (!body.success) return reply.code(400).send({ error: 'invalid_input' });
+  await storeSupabaseConnection(db, userId, body.data.projectRef, body.data.key);
+  return { ok: true };
+});
+
+app.delete('/v1/connections/supabase', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  return { ok: await disconnectSupabase(db, userId) };
+});
+
+app.get('/v1/connections/supabase/status', async (req, reply) => {
+  const userId = await requireUser(req, reply);
+  if (!userId) return reply;
+  const conn = await db.connection.findFirst({ where: { userId, provider: 'supabase' }, select: { status: true, providerLogin: true } });
+  return { connected: conn?.status === 'connected', login: conn?.providerLogin ?? null };
 });
 
 const port = Number(process.env.PORT ?? 3000);

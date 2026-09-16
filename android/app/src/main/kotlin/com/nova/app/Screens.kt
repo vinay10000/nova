@@ -355,6 +355,15 @@ class ChatViewModel(
             "step" -> {
               _currentStep.value = chunk.label
             }
+            "notice" -> {
+              // F1: surface reconnect/retry/plugin notices instead of dropping them.
+              // A reconnect notice becomes a visible hint; the text stream continues.
+              val hint = chunk.message ?: chunk.provider?.let { "$it needs attention" } ?: "notice"
+              _currentStep.value = if (chunk.code == "reconnect") "Reconnect ${chunk.provider ?: "provider"} to continue" else hint
+            }
+            "approval" -> {
+              _currentStep.value = "Waiting for approval: ${chunk.toolId ?: "action"}"
+            }
             "error" -> {
               _error.value = chunk.code ?: "stream_error"
               _streaming.value = false
@@ -465,7 +474,7 @@ fun highlightPluginMentions(text: String, accent: Color): AnnotatedString {
     append(text)
     // All @plugin ids (§42) — an unstyled mention reads as plain text and users
     // report the plugin as "not showing", so every id must be covered here.
-    val pattern = Regex("@(github|gmail|leetcode|calendar)\\b", RegexOption.IGNORE_CASE)
+    val pattern = Regex("@(github|gmail|leetcode|calendar|drive|docs|sheets|vercel|supabase)\\b", RegexOption.IGNORE_CASE)
     for (match in pattern.findAll(text)) {
       addStyle(SpanStyle(fontWeight = FontWeight.Bold, background = accent.copy(alpha = 0.30f)), match.range.first, match.range.last + 1)
     }
@@ -650,7 +659,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     drawerState = drawerState,
     drawerContent = {
       ModalDrawerSheet(
-        drawerContainerColor = scheme.surface,
+        drawerContainerColor = if (isSystemInDarkTheme()) NovaPalette.GlassScrimDark else scheme.surface,
         drawerContentColor = scheme.onSurface,
         modifier = Modifier.width(300.dp),
       ) {
@@ -1178,12 +1187,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
           verticalAlignment = Alignment.Bottom,
         ) {
-          Surface(
-            shape = RoundedCornerShape(26.dp),
-            color = scheme.surfaceVariant,
-            modifier = Modifier.weight(1f),
-          ) {
-            Row(Modifier.padding(start = 4.dp, end = 6.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+          GlassPanel(modifier = Modifier.weight(1f)) {
+            Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 6.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
               Box {
                 IconButton(onClick = { showAttachMenu = true }, enabled = !uploading && !streaming, modifier = Modifier.size(40.dp)) {
                   Icon(Icons.Default.Add, contentDescription = "Attach", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
@@ -1377,20 +1382,29 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               Button(onClick = {
                 scope.launch {
                   error = null
-                  runCatching {
-                    api.createAgent(
-                      com.nova.app.data.CreateAgentRequest(
-                        name = obj["name"]!!.jsonPrimitive.content,
-                        goal = obj["goal"]!!.jsonPrimitive.content,
-                        instructions = obj["instructions"]?.jsonPrimitive?.contentOrNull ?: obj["goal"]!!.jsonPrimitive.content,
-                        tools = obj["tools"]!!.jsonArray.map { it.jsonPrimitive.content },
-                      ),
-                    )
-                  }.onSuccess { created ->
-                    built = null; nl = ""
-                    runCatching { api.activateAgent(created.id) }
-                    refresh()
-                  }.onFailure { error = "Save failed. The draft named a tool that does not exist yet." }
+                  // F5: never force-unwrap model output — a malformed draft shows
+                  // an error, not a crash.
+                  val name = obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                  val goal = obj["goal"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                  val tools = runCatching { obj["tools"]?.jsonArray?.map { it.jsonPrimitive.content } }.getOrNull()?.filter { it.isNotBlank() }
+                  if (name == null || goal == null || tools.isNullOrEmpty()) {
+                    error = "That draft is incomplete. Describe the job with a little more detail and draft again."
+                  } else {
+                    runCatching {
+                      api.createAgent(
+                        com.nova.app.data.CreateAgentRequest(
+                          name = name,
+                          goal = goal,
+                          instructions = obj["instructions"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: goal,
+                          tools = tools,
+                        ),
+                      )
+                    }.onSuccess { created ->
+                      built = null; nl = ""
+                      runCatching { api.activateAgent(created.id) }
+                      refresh()
+                    }.onFailure { error = "Save failed. The draft named a tool that does not exist yet." }
+                  }
                 }
               }, shape = RoundedCornerShape(14.dp)) { Text("Keep this setup") }
             }
@@ -1721,7 +1735,10 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   // needs_reconnect / available / not_configured / not_built. No dead buttons.
   var providers by remember { mutableStateOf<List<com.nova.app.data.ProviderDto>>(emptyList()) }
   val live = providers.count { it.state == "connected" }
-  val glyphOf = mapOf("github" to "G", "gmail" to "M", "calendar" to "C", "slack" to "S", "notion" to "N", "x" to "X")
+  val glyphOf = mapOf("github" to "G", "gmail" to "M", "calendar" to "C", "drive" to "D", "vercel" to "V", "supabase" to "S", "slack" to "S", "notion" to "N", "x" to "X")
+  // F2 token-connect dialogs (Vercel/Supabase have no OAuth round-trip).
+  var vercelDialog by remember { mutableStateOf(false) }
+  var supabaseDialog by remember { mutableStateOf(false) }
 
   fun refresh() {
     scope.launch {
@@ -1813,32 +1830,44 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                 when (p.id) {
                   "github" -> runCatching { api.disconnectGitHub() }.onSuccess { refresh() }
                   "gmail" -> runCatching { api.disconnectGmail() }.onSuccess { refresh() }
+                  "calendar" -> runCatching { api.disconnectCalendar() }.onSuccess { refresh() }
+                  "drive" -> runCatching { api.disconnectDrive() }.onSuccess { refresh() }
+                  "vercel" -> runCatching { api.disconnectVercel() }.onSuccess { refresh() }
+                  "supabase" -> runCatching { api.disconnectSupabase() }.onSuccess { refresh() }
                 }
               }
             }) {
               Text("Disconnect", color = scheme.error, style = MaterialTheme.typography.labelMedium)
             }
-          } else if (needsReconnect || (p.state == "available" && p.id in setOf("github", "gmail", "calendar"))) {
+          } else if (needsReconnect || (p.state == "available" && p.id in setOf("github", "gmail", "calendar", "drive", "vercel", "supabase"))) {
             // §38: OAuth — redirect user to the provider to authorize.
             // Backend callback redirects to nova://connections/{provider}/connected;
             // ON_RESUME above refreshes state when the user returns.
+            // Vercel/Supabase are token-based: open a paste-a-key dialog instead.
             TextButton(
               enabled = !isConnecting,
               onClick = {
-                scope.launch {
-                  connecting = p.id
-                  when (p.id) {
-                    "github" -> runCatching { api.githubAuthorize() }
-                      .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
-                      .onFailure { error = "Could not start GitHub connection. Check backend config." }
-                    "calendar" -> runCatching { api.calendarAuthorize() }
-                      .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
-                      .onFailure { error = "Could not start Calendar connection. Check backend config." }
-                    else -> runCatching { api.gmailAuthorize() }
-                      .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
-                      .onFailure { error = "Could not start Gmail connection. Check backend config." }
+                when (p.id) {
+                  "vercel" -> vercelDialog = true
+                  "supabase" -> supabaseDialog = true
+                  else -> scope.launch {
+                    connecting = p.id
+                    when (p.id) {
+                      "github" -> runCatching { api.githubAuthorize() }
+                        .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
+                        .onFailure { error = "Could not start GitHub connection. Check backend config." }
+                      "calendar" -> runCatching { api.calendarAuthorize() }
+                        .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
+                        .onFailure { error = "Could not start Calendar connection. Check backend config." }
+                      "drive" -> runCatching { api.driveAuthorize() }
+                        .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
+                        .onFailure { error = "Could not start Drive connection. Check backend config." }
+                      else -> runCatching { api.gmailAuthorize() }
+                        .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
+                        .onFailure { error = "Could not start Gmail connection. Check backend config." }
+                    }
+                    connecting = null
                   }
-                  connecting = null
                 }
               },
             ) {
@@ -1874,6 +1903,72 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     }
     item {
       Text("Keys stay on the server. Revoke anytime from the source.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp))
+    }
+    // F2 token-connect dialogs. Rendered as lazy items so they share the screen scope.
+    item {
+      if (vercelDialog) {
+        var token by remember { mutableStateOf("") }
+        var busy by remember { mutableStateOf(false) }
+        var formError by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+          onDismissRequest = { if (!busy) vercelDialog = false },
+          title = { Text("Connect Vercel", fontFamily = NovaDisplay) },
+          text = {
+            Column {
+              Text("Paste a Vercel token (Account Settings → Tokens). It is stored encrypted on the server.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+              Spacer(Modifier.height(10.dp))
+              OutlinedTextField(token, { token = it }, label = { Text("Token") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
+              formError?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
+            }
+          },
+          confirmButton = {
+            TextButton(enabled = token.isNotBlank() && !busy, onClick = {
+              scope.launch {
+                busy = true; formError = null
+                runCatching { api.connectVercel(com.nova.app.data.ConnectTokenRequest(token.trim())) }
+                  .onSuccess { vercelDialog = false; refresh() }
+                  .onFailure { formError = "Could not save the token. Check it and retry." }
+                busy = false
+              }
+            }) { Text("Connect", color = scheme.primary, fontWeight = FontWeight.Bold) }
+          },
+          dismissButton = { TextButton(enabled = !busy, onClick = { vercelDialog = false }) { Text("Cancel", color = scheme.onSurfaceVariant) } },
+        )
+      }
+    }
+    item {
+      if (supabaseDialog) {
+        var ref by remember { mutableStateOf("") }
+        var key by remember { mutableStateOf("") }
+        var busy by remember { mutableStateOf(false) }
+        var formError by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+          onDismissRequest = { if (!busy) supabaseDialog = false },
+          title = { Text("Connect Supabase", fontFamily = NovaDisplay) },
+          text = {
+            Column {
+              Text("Project ref plus a key (Project Settings → API). Stored encrypted on the server.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+              Spacer(Modifier.height(10.dp))
+              OutlinedTextField(ref, { ref = it }, label = { Text("Project ref") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
+              Spacer(Modifier.height(8.dp))
+              OutlinedTextField(key, { key = it }, label = { Text("Key") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
+              formError?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
+            }
+          },
+          confirmButton = {
+            TextButton(enabled = ref.isNotBlank() && key.isNotBlank() && !busy, onClick = {
+              scope.launch {
+                busy = true; formError = null
+                runCatching { api.connectSupabase(com.nova.app.data.ConnectSupabaseRequest(ref.trim(), key.trim())) }
+                  .onSuccess { supabaseDialog = false; refresh() }
+                  .onFailure { formError = "Could not save the key. Check both fields and retry." }
+                busy = false
+              }
+            }) { Text("Connect", color = scheme.primary, fontWeight = FontWeight.Bold) }
+          },
+          dismissButton = { TextButton(enabled = !busy, onClick = { supabaseDialog = false }) { Text("Cancel", color = scheme.onSurfaceVariant) } },
+        )
+      }
     }
   }
 }
@@ -1950,7 +2045,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             Column(modifier = Modifier.weight(1f)) {
               Text("Connected accounts", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = scheme.onSurface)
               Spacer(Modifier.height(2.dp))
-              Text("GitHub, Gmail, Google Calendar, LeetCode", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+              Text("GitHub, Gmail, Calendar, Drive, Docs, Sheets, Vercel, Supabase, LeetCode", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
             }
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
           }

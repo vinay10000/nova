@@ -118,4 +118,18 @@ paths:
   /v1/connections/gmail/status:
     get: { summary: Gmail connection status (§38), responses: { '200': { description: ok } } }
   /v1/plugins:
-    get: { summary: Chat plugins — @mentions (§42), responses: { '200': { description: ok } } }
+    get: { summary: Chat plugins — @mentions (§42: github,gmail,leetcode,calendar,drive,docs,sheets,vercel,supabase), responses: { '200': { description: ok } } }
+  /v1/connections/drive/authorize:
+    get: { summary: Start Drive OAuth (covers Docs+Sheets, F2), responses: { '200': { description: ok } } }
+  /v1/connections/drive/callback:
+    get: { summary: Drive OAuth callback (F2), responses: { '200': { description: redirect } } }
+  /v1/connections/drive/status:
+    get: { summary: Drive connection status (F2), responses: { '200': { description: ok } } }
+  /v1/connections/vercel:
+    post: { summary: Connect Vercel with a token (F2), responses: { '200': { description: ok } } }
+  /v1/connections/vercel/status:
+    get: { summary: Vercel connection status (F2), responses: { '200': { description: ok } } }
+  /v1/connections/supabase:
+    post: { summary: Connect Supabase with project ref + key (F2), responses: { '200': { description: ok } } }
+  /v1/connections/supabase/status:
+    get: { summary: Supabase connection status (F2), responses: { '200': { description: ok } } }

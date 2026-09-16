@@ -1,6 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import type { AIProvider } from '../ai/AIProvider.js';
-import { MODELS } from '../ai/GeminiProvider.js';
+import { MODELS } from '../ai/models.js';
 import { runAgentLoop, stepMeta } from '../agent/runtime.js';
 import { toolRegistry } from '../tools/registry.js';
 

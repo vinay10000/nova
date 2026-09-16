@@ -8,7 +8,7 @@
     "postinstall": "prisma generate",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node --env-file-if-exists=.env dist/index.js",
-    "test": "tsx src/tools/Tool.test.ts && tsx src/auth.test.ts && tsx src/services/fileService.test.ts && tsx src/services/chatPlugins.test.ts && tsx src/agent/runtime.test.ts"
+    "test": "tsx src/tools/Tool.test.ts && tsx src/auth.test.ts && tsx src/services/fileService.test.ts && tsx src/services/chatPlugins.test.ts && tsx src/agent/runtime.test.ts && tsx src/browser/browserPolicy.test.ts && tsx src/browser/browserTaskStore.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",
@@ -16,6 +16,7 @@
     "@google/genai": "^2.22.0",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
+    "e2b": "^2.50.0",
     "fastify": "^5.12.4",
     "jose": "^6.2.12",
     "zod": "^4.6.2"

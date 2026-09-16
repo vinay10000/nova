@@ -29,6 +29,10 @@ data class StreamChunk(
   val retryable: Boolean? = null,
   @SerialName("interactionId") val interactionId: String? = null,
   @SerialName("label") val label: String? = null,
+  // F1: backend notice/approval chunks carry these; previously dropped by the client.
+  val provider: String? = null,
+  val message: String? = null,
+  @SerialName("approvalId") val approvalId: String? = null,
 )
 
 @Serializable private data class StreamRequest(
@@ -179,6 +183,40 @@ interface NovaApi {
   @retrofit2.http.GET("/v1/connections/calendar/authorize")
   suspend fun calendarAuthorize(): GmailAuthorizeResponse
 
+  @retrofit2.http.GET("/v1/connections/calendar/status")
+  suspend fun calendarStatus(): GmailStatusResponse
+
+  @retrofit2.http.DELETE("/v1/connections/calendar")
+  suspend fun disconnectCalendar(): OkResponse
+
+  // F2: Drive OAuth + token-based providers
+  @retrofit2.http.GET("/v1/connections/drive/authorize")
+  suspend fun driveAuthorize(): GmailAuthorizeResponse
+
+  @retrofit2.http.GET("/v1/connections/drive/status")
+  suspend fun driveStatus(): GmailStatusResponse
+
+  @retrofit2.http.DELETE("/v1/connections/drive")
+  suspend fun disconnectDrive(): OkResponse
+
+  @retrofit2.http.POST("/v1/connections/vercel")
+  suspend fun connectVercel(@retrofit2.http.Body body: ConnectTokenRequest): OkResponse
+
+  @retrofit2.http.GET("/v1/connections/vercel/status")
+  suspend fun vercelStatus(): GmailStatusResponse
+
+  @retrofit2.http.DELETE("/v1/connections/vercel")
+  suspend fun disconnectVercel(): OkResponse
+
+  @retrofit2.http.POST("/v1/connections/supabase")
+  suspend fun connectSupabase(@retrofit2.http.Body body: ConnectSupabaseRequest): OkResponse
+
+  @retrofit2.http.GET("/v1/connections/supabase/status")
+  suspend fun supabaseStatus(): GmailStatusResponse
+
+  @retrofit2.http.DELETE("/v1/connections/supabase")
+  suspend fun disconnectSupabase(): OkResponse
+
   // §42 @plugin mention picker
   @retrofit2.http.GET("/v1/plugins")
   suspend fun plugins(): PluginsResponse
@@ -250,6 +288,10 @@ interface NovaApi {
 @Serializable data class GitHubStatusResponse(val connected: Boolean, val login: String? = null, val scopes: List<String> = emptyList())
 @Serializable data class GmailAuthorizeResponse(val url: String, val state: String)
 @Serializable data class GmailStatusResponse(val connected: Boolean, val login: String? = null, val scopes: List<String> = emptyList())
+
+// F2 token-connect bodies.
+@Serializable data class ConnectTokenRequest(val token: String, val login: String? = null)
+@Serializable data class ConnectSupabaseRequest(val projectRef: String, val key: String)
 
 // §42 plugin catalogue for the @ mention picker.
 @Serializable data class PluginDto(val id: String, val name: String, val blurb: String, val requires: String? = null, val ready: Boolean = false)

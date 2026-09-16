@@ -578,6 +578,257 @@ const gmailSendMessage: Tool = {
   },
 };
 
+// ---- F2: Drive/Docs/Sheets (single 'drive' connection) -----------------------
+async function driveFetch(ctx: ToolContext, base: string, path: string, init?: RequestInit, retried = false): Promise<unknown> {
+  const { getDriveAccessToken, markDriveConnectionExpired } = await import('../integrations/googleDrive.js');
+  const token = await getDriveAccessToken(ctx.db, ctx.userId, { forceRefresh: retried });
+  if (!token) {
+    if (retried) await markDriveConnectionExpired(ctx.db, ctx.userId);
+    throw new Error(retried
+      ? 'drive_auth_invalid: the Drive authorization is no longer valid. Ask the user to reconnect Drive in Connections, then retry.'
+      : 'drive_not_connected');
+  }
+  const res = await fetch(`${base}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...init?.headers } });
+  if (res.status === 401 && !retried) {
+    const { DRIVE_API, DOCS_API, SHEETS_API } = await import('../integrations/googleDrive.js');
+    void DRIVE_API; void DOCS_API; void SHEETS_API;
+    return driveFetch(ctx, base, path, init, true);
+  }
+  if (!res.ok) throw new Error(`Drive API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+  return res.json();
+}
+
+const driveList: Tool = {
+  id: 'drive_list', description: 'List files in Google Drive (F2)', scope: 'drive.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { query: { type: 'string' }, pageSize: { type: 'number' } } },
+  execute: async (input, ctx) => {
+    const { DRIVE_API } = await import('../integrations/googleDrive.js');
+    const { query = '', pageSize = 20 } = (input ?? {}) as Record<string, string | number | undefined>;
+    const params = new URLSearchParams({ pageSize: String(Math.min(50, Math.max(1, Number(pageSize) || 20))), fields: 'files(id,name,mimeType,modifiedTime)' });
+    if (typeof query === 'string' && query) params.set('q', query);
+    return driveFetch(ctx, DRIVE_API, `/files?${params}`);
+  },
+};
+
+const driveSearch = driveList; // alias kept for picker clarity (same tool, keyword-routed)
+void driveSearch;
+
+const driveDocsGet: Tool = {
+  id: 'drive_docs_get', description: 'Get a Google Doc by id with text content (F2)', scope: 'drive.docs.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { documentId: { type: 'string' } }, required: ['documentId'] },
+  execute: async (input, ctx) => {
+    const { DOCS_API } = await import('../integrations/googleDrive.js');
+    const { documentId } = input as Record<string, unknown>;
+    if (typeof documentId !== 'string' || !documentId.trim()) throw new Error('invalid_input: documentId is required');
+    return driveFetch(ctx, DOCS_API, `/documents/${encodeURIComponent(documentId.trim())}`);
+  },
+};
+
+const driveDocsCreate: Tool = {
+  id: 'drive_docs_create', description: 'Create a Google Doc (F2 write — approval required)', scope: 'drive.docs.write', isWrite: true, approval: 'always',
+  inputSchema: { type: 'object', properties: { title: { type: 'string' }, text: { type: 'string' } }, required: ['title'] },
+  execute: async (input, ctx) => {
+    const { DOCS_API } = await import('../integrations/googleDrive.js');
+    const { title, text } = input as Record<string, unknown>;
+    if (typeof title !== 'string' || !title.trim()) throw new Error('invalid_input: title is required');
+    const created = (await driveFetch(ctx, DOCS_API, '/documents', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: title.trim() }),
+    })) as { documentId?: string };
+    if (typeof text === 'string' && text && created.documentId) {
+      await driveFetch(ctx, DOCS_API, `/documents/${created.documentId}:batchUpdate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests: [{ insertText: { location: { index: 1 }, text } }] }),
+      });
+    }
+    return created;
+  },
+};
+
+const driveSheetsRead: Tool = {
+  id: 'drive_sheets_read', description: 'Read a Google Sheet range (F2)', scope: 'drive.sheets.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { spreadsheetId: { type: 'string' }, range: { type: 'string' } }, required: ['spreadsheetId', 'range'] },
+  execute: async (input, ctx) => {
+    const { SHEETS_API } = await import('../integrations/googleDrive.js');
+    const { spreadsheetId, range } = input as Record<string, unknown>;
+    if (typeof spreadsheetId !== 'string' || !spreadsheetId.trim()) throw new Error('invalid_input: spreadsheetId is required');
+    if (typeof range !== 'string' || !range.trim()) throw new Error('invalid_input: range is required (e.g. Sheet1!A1:D20)');
+    return driveFetch(ctx, SHEETS_API, `/spreadsheets/${encodeURIComponent(spreadsheetId.trim())}/values/${encodeURIComponent(range.trim())}`);
+  },
+};
+
+const driveSheetsAppend: Tool = {
+  id: 'drive_sheets_append', description: 'Append rows to a Google Sheet (F2 write — approval required)', scope: 'drive.sheets.write', isWrite: true, approval: 'always',
+  inputSchema: { type: 'object', properties: { spreadsheetId: { type: 'string' }, range: { type: 'string' }, values: { type: 'array' } }, required: ['spreadsheetId', 'range', 'values'] },
+  execute: async (input, ctx) => {
+    const { SHEETS_API } = await import('../integrations/googleDrive.js');
+    const { spreadsheetId, range, values } = input as Record<string, unknown>;
+    if (typeof spreadsheetId !== 'string' || !spreadsheetId.trim()) throw new Error('invalid_input: spreadsheetId is required');
+    if (typeof range !== 'string' || !range.trim()) throw new Error('invalid_input: range is required');
+    if (!Array.isArray(values)) throw new Error('invalid_input: values must be an array of rows');
+    return driveFetch(ctx, SHEETS_API, `/spreadsheets/${encodeURIComponent(spreadsheetId.trim())}/values/${encodeURIComponent(range.trim())}:append?valueInputOption=USER_ENTERED`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values }),
+    });
+  },
+};
+
+// ---- F2: Vercel (token-based, provider 'vercel') ------------------------------
+async function vercelFetch(ctx: ToolContext, path: string, init?: RequestInit): Promise<unknown> {
+  const { getVercelToken, markVercelExpired } = await import('../integrations/vercel.js');
+  const { VERCEL_API } = await import('../integrations/vercel.js');
+  const token = await getVercelToken(ctx.db, ctx.userId);
+  if (!token) throw new Error('vercel_not_connected');
+  const res = await fetch(`${VERCEL_API}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...init?.headers } });
+  if (res.status === 401 || res.status === 403) {
+    await markVercelExpired(ctx.db, ctx.userId);
+    throw new Error('vercel_auth_invalid: the Vercel token is no longer valid. Ask the user to reconnect Vercel in Connections, then retry.');
+  }
+  if (!res.ok) throw new Error(`Vercel API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+  return res.json();
+}
+
+const vercelListProjects: Tool = {
+  id: 'vercel_list_projects', description: 'List Vercel projects (F2)', scope: 'vercel.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: {} },
+  execute: (_input, ctx) => vercelFetch(ctx, '/v9/projects?limit=20'),
+};
+
+const vercelListDeployments: Tool = {
+  id: 'vercel_list_deployments', description: 'List recent Vercel deployments, optionally for one project (F2)', scope: 'vercel.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { projectId: { type: 'string' }, limit: { type: 'number' } } },
+  execute: (input, ctx) => {
+    const { projectId, limit } = (input ?? {}) as Record<string, string | number | undefined>;
+    const params = new URLSearchParams({ limit: String(Math.min(50, Math.max(1, Number(limit) || 10))) });
+    if (typeof projectId === 'string' && projectId) params.set('projectId', projectId);
+    return vercelFetch(ctx, `/v6/deployments?${params}`);
+  },
+};
+
+const vercelTriggerDeploy: Tool = {
+  id: 'vercel_trigger_deploy', description: 'Trigger a Vercel redeploy of a deployment (F2 write — approval required)', scope: 'vercel.deploy', isWrite: true, approval: 'always',
+  inputSchema: { type: 'object', properties: { deploymentId: { type: 'string' } }, required: ['deploymentId'] },
+  execute: (input, ctx) => {
+    const { deploymentId } = input as Record<string, unknown>;
+    if (typeof deploymentId !== 'string' || !deploymentId.trim()) throw new Error('invalid_input: deploymentId is required');
+    return vercelFetch(ctx, `/v13/deployments/${encodeURIComponent(deploymentId.trim())}/redeploy`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  },
+};
+
+// ---- F2: Supabase (token-based, provider 'supabase') --------------------------
+async function supabaseFetch(ctx: ToolContext, path: string, init?: RequestInit): Promise<{ res: Response; creds: { projectRef: string } }> {
+  const { getSupabaseCreds, markSupabaseExpired, supabaseRestBase } = await import('../integrations/supabase.js');
+  const creds = await getSupabaseCreds(ctx.db, ctx.userId);
+  if (!creds) throw new Error('supabase_not_connected');
+  const res = await fetch(`${supabaseRestBase(creds.projectRef)}${path}`, {
+    ...init,
+    headers: { apikey: creds.key, Authorization: `Bearer ${creds.key}`, 'Content-Type': 'application/json', ...init?.headers },
+  });
+  if (res.status === 401 || res.status === 403) {
+    await markSupabaseExpired(ctx.db, ctx.userId);
+    throw new Error('supabase_auth_invalid: the Supabase key is no longer valid. Ask the user to reconnect Supabase in Connections, then retry.');
+  }
+  return { res, creds };
+}
+
+const supabaseListTables: Tool = {
+  id: 'supabase_list_tables', description: 'List Supabase tables via the PostgREST OpenAPI spec (F2)', scope: 'supabase.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: {} },
+  execute: async (_input, ctx) => {
+    const { res } = await supabaseFetch(ctx, '/', { headers: { Accept: 'application/openapi+json' } });
+    if (!res.ok) throw new Error(`Supabase API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+    const spec = (await res.json()) as { paths?: Record<string, unknown> };
+    return { tables: Object.keys(spec.paths ?? {}).map((p) => p.replace(/^\//, '')) };
+  },
+};
+
+const supabaseQueryRows: Tool = {
+  id: 'supabase_query_rows', description: 'Query rows from a Supabase table (F2)', scope: 'supabase.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { table: { type: 'string' }, limit: { type: 'number' }, select: { type: 'string' } }, required: ['table'] },
+  execute: async (input, ctx) => {
+    const { table, limit, select } = (input ?? {}) as Record<string, string | number | undefined>;
+    if (typeof table !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) throw new Error('invalid_input: table must be a safe identifier');
+    const params = new URLSearchParams({ select: typeof select === 'string' && select ? select : '*', limit: String(Math.min(100, Math.max(1, Number(limit) || 20))) });
+    const { res } = await supabaseFetch(ctx, `/${table}?${params}`, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`Supabase API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+    return { rows: await res.json() };
+  },
+};
+
+const supabaseInsertRow: Tool = {
+  id: 'supabase_insert_row', description: 'Insert a row into a Supabase table (F2 write — approval required)', scope: 'supabase.write', isWrite: true, approval: 'always',
+  inputSchema: { type: 'object', properties: { table: { type: 'string' }, row: { type: 'object' } }, required: ['table', 'row'] },
+  execute: async (input, ctx) => {
+    const { table, row } = (input ?? {}) as Record<string, unknown>;
+    if (typeof table !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) throw new Error('invalid_input: table must be a safe identifier');
+    if (!row || typeof row !== 'object') throw new Error('invalid_input: row is required');
+    const { res } = await supabaseFetch(ctx, `/${table}`, { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(row) });
+    if (!res.ok) throw new Error(`Supabase API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+    return { rows: await res.json() };
+  },
+};
+
+// ---- F3: Agent Mode browser (Browserless free tier, policy-guarded) ---------
+const browserOpen: Tool = {
+  id: 'browser_open', description: 'Fetch a public https page as text (F3 agent browser; SSRF-guarded)', scope: 'browser.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { url: { type: 'string' }, instruction: { type: 'string' } }, required: ['url'] },
+  execute: async (input) => {
+    const { defaultBrowser } = await import('../browser/BrowserProvider.js');
+    const { url, instruction } = (input ?? {}) as Record<string, unknown>;
+    if (typeof url !== 'string' || !url.trim()) throw new Error('invalid_input: url is required');
+    return defaultBrowser().run({ url: url.trim(), instruction: typeof instruction === 'string' ? instruction : 'summarize page' });
+  },
+};
+
+// ---- F3: Agent Mode cloud workspace (E2B free tier) --------------------------
+const workspaceCreate: Tool = {
+  id: 'workspace_create', description: 'Create a cloud code sandbox, returns sandboxId (F3)', scope: 'workspace.create', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: {} },
+  execute: async () => {
+    const { defaultSandbox } = await import('../sandbox/CodeSandboxProvider.js');
+    return defaultSandbox().create();
+  },
+};
+
+const workspaceWriteFile: Tool = {
+  id: 'workspace_write_file', description: 'Write a file into the cloud sandbox (F3)', scope: 'workspace.write', isWrite: true, approval: 'always',
+  inputSchema: { type: 'object', properties: { sandboxId: { type: 'string' }, path: { type: 'string' }, content: { type: 'string' } }, required: ['sandboxId', 'path', 'content'] },
+  execute: async (input) => {
+    const { defaultSandbox } = await import('../sandbox/CodeSandboxProvider.js');
+    const { sandboxId, path, content } = (input ?? {}) as Record<string, unknown>;
+    return defaultSandbox().writeFile(String(sandboxId ?? ''), String(path ?? ''), typeof content === 'string' ? content : '');
+  },
+};
+
+const workspaceRunCommand: Tool = {
+  id: 'workspace_run_command', description: 'Run a shell command in the cloud sandbox (F3 — approval required)', scope: 'workspace.exec', isWrite: true, approval: 'always',
+  inputSchema: { type: 'object', properties: { sandboxId: { type: 'string' }, command: { type: 'string' }, timeoutMs: { type: 'number' } }, required: ['sandboxId', 'command'] },
+  execute: async (input) => {
+    const { defaultSandbox } = await import('../sandbox/CodeSandboxProvider.js');
+    const { sandboxId, command, timeoutMs } = (input ?? {}) as Record<string, unknown>;
+    return defaultSandbox().run(String(sandboxId ?? ''), String(command ?? ''), typeof timeoutMs === 'number' ? timeoutMs : 60_000);
+  },
+};
+
+const workspaceReadFile: Tool = {
+  id: 'workspace_read_file', description: 'Read a file from the cloud sandbox (F3)', scope: 'workspace.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { sandboxId: { type: 'string' }, path: { type: 'string' } }, required: ['sandboxId', 'path'] },
+  execute: async (input) => {
+    const { defaultSandbox } = await import('../sandbox/CodeSandboxProvider.js');
+    const { sandboxId, path } = (input ?? {}) as Record<string, unknown>;
+    return defaultSandbox().readFile(String(sandboxId ?? ''), String(path ?? ''));
+  },
+};
+
+const workspaceDestroy: Tool = {
+  id: 'workspace_destroy', description: 'Destroy a cloud sandbox (F3)', scope: 'workspace.create', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { sandboxId: { type: 'string' } }, required: ['sandboxId'] },
+  execute: async (input) => {
+    const { defaultSandbox } = await import('../sandbox/CodeSandboxProvider.js');
+    const { sandboxId } = (input ?? {}) as Record<string, unknown>;
+    await defaultSandbox().destroy(String(sandboxId ?? ''));
+    return { destroyed: true };
+  },
+};
+
 export const toolRegistry = new Map<string, Tool>(
   [
     githubListIssues, githubCreateIssue, githubListPullRequests,
@@ -588,6 +839,11 @@ export const toolRegistry = new Map<string, Tool>(
     leetcodeGetContestHistory, leetcodeDailyChallenge, leetcodeSearchProblems,
     leetcodeGetProblem,
     calendarListEvents, calendarCreateEvent,
+    driveList, driveDocsGet, driveDocsCreate, driveSheetsRead, driveSheetsAppend,
+    vercelListProjects, vercelListDeployments, vercelTriggerDeploy,
+    supabaseListTables, supabaseQueryRows, supabaseInsertRow,
+    browserOpen,
+    workspaceCreate, workspaceWriteFile, workspaceRunCommand, workspaceReadFile, workspaceDestroy,
   ].map((t) => [t.id, t]),
 );
 
@@ -596,7 +852,9 @@ export const toolRegistry = new Map<string, Tool>(
  * or is needed, so the authorization gate must not demand a Connection.
  */
 export function isServerKeyedTool(toolId: string): boolean {
-  return toolId.startsWith('web_') || toolId.startsWith('leetcode_');
+  // F3: browser_* and workspace_* run on backend keys (Browserless/E2B) — no
+  // per-user OAuth exists, so the gate must not demand a Connection row.
+  return toolId.startsWith('web_') || toolId.startsWith('leetcode_') || toolId.startsWith('browser_') || toolId.startsWith('workspace_');
 }
 
 /** §15: attach to the Gemini request as function declarations. */
