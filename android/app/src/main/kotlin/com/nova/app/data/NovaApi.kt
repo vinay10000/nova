@@ -33,6 +33,7 @@ data class StreamChunk(
   val provider: String? = null,
   val message: String? = null,
   @SerialName("approvalId") val approvalId: String? = null,
+  val blocks: List<UiBlockDto> = emptyList(),
 )
 
 @Serializable private data class StreamRequest(
@@ -235,12 +236,29 @@ interface NovaApi {
 @Serializable data class LoginRequest(val email: String, val password: String)
 @Serializable data class AuthResponse(val token: String)
 @Serializable data class ConversationsResponse(val conversations: List<ConversationDto>, val total: Int = 0, val hasMore: Boolean = false)
-@Serializable data class MessageDto(val id: String = "", val role: String, val content: String, val attachments: List<AttachmentInfo> = emptyList())
+@Serializable data class MessageDto(val id: String = "", val role: String, val content: String, val attachments: List<AttachmentInfo> = emptyList(), val ui: List<UiBlockDto> = emptyList())
 @Serializable data class AttachmentInfo(val id: String, val filename: String, val mime: String, val size: Long = 0)
 @Serializable data class ConversationDetailDto(
   val id: String,
   val title: String,
   val messages: List<MessageDto> = emptyList(),
+)
+
+@Serializable data class UiActionDto(val type: String, val label: String, val value: String? = null)
+@Serializable data class UiItemDto(val label: String, val secondary: String? = null, val value: String? = null)
+@Serializable data class UiMetricDto(val label: String, val value: String, val change: String? = null)
+/** Flat DTO keeps unknown future block types decodable; the renderer ignores them safely. */
+@Serializable data class UiBlockDto(
+  val type: String,
+  val id: String = "",
+  val title: String? = null,
+  val body: String? = null,
+  val metadata: List<UiItemDto> = emptyList(),
+  val metrics: List<UiMetricDto> = emptyList(),
+  val items: List<UiItemDto> = emptyList(),
+  val columns: List<String> = emptyList(),
+  val rows: List<List<String>> = emptyList(),
+  val actions: List<UiActionDto> = emptyList(),
 )
 
 // §52 agent DTOs. Build returns either a config or {questions[]} — kept as

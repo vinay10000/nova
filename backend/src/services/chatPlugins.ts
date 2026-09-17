@@ -151,6 +151,17 @@ export const chatPlugins: ChatPlugin[] = [
       'The user is asking about Supabase. Use supabase_list_tables then supabase_query_rows with a safe table name. ' +
       'Inserts need an agent with approval — say so in chat. Never fabricate rows. On auth errors, tell the user to reconnect Supabase.',
   },
+  {
+    id: 'browser',
+    name: 'Browser',
+    blurb: 'Research a public web page and summarize live content',
+    toolIds: ['browser_open'],
+    requires: null,
+    systemInstruction:
+      'The user wants live information from a public web page. Use browser_open when a complete HTTPS URL is available. ' +
+      'If the user did not provide a URL, ask for the website or URL before browsing. ' +
+      'Never claim that a page was opened or researched unless the browser tool returned content. Summarize the returned content clearly.',
+  },
 ];
 
 
@@ -345,6 +356,10 @@ export function detectPlugin(
     const plugin = usable('supabase');
     if (plugin) return { plugin, cleanedMessage: message };
   }
+  if (/\b(browser|open (the )?browser|research (online|on the web)|web page|website)\b/i.test(message)) {
+    const plugin = usable('browser');
+    if (plugin) return { plugin, cleanedMessage: message };
+  }
   return null;
 }
 
@@ -367,4 +382,3 @@ export function pluginToolDefs(plugin: ChatPlugin): ToolDef[] {
     .filter((t): t is Tool => !!t);
   return toToolDefs(tools);
 }
-

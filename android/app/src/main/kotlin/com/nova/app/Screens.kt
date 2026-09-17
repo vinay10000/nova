@@ -33,9 +33,11 @@ import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Logout
@@ -45,6 +47,7 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.VolumeUp
@@ -71,6 +74,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -90,6 +98,7 @@ import com.nova.app.data.LoginRequest
 import com.nova.app.data.ModelDto
 import com.nova.app.data.NovaApi
 import com.nova.app.data.SessionToken
+import com.nova.app.data.UiBlockDto
 import com.nova.app.voice.AndroidVoiceInput
 import com.nova.app.voice.RemoteVoiceOutput
 import com.nova.app.voice.VoiceOutput
@@ -254,7 +263,7 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
 
 // §8 entities (backend-owned; Room cache mirrors these).
 @kotlinx.serialization.Serializable
-data class Message(val id: String = "", val role: String, val content: String, val attachments: List<com.nova.app.data.AttachmentInfo> = emptyList(), val reasoning: String = "")
+data class Message(val id: String = "", val role: String, val content: String, val attachments: List<com.nova.app.data.AttachmentInfo> = emptyList(), val reasoning: String = "", val ui: List<UiBlockDto> = emptyList())
 @kotlinx.serialization.Serializable
 data class Agent(val id: String = "", val name: String, val goal: String, val status: String = "draft")
 
@@ -348,6 +357,10 @@ class ChatViewModel(
               val cur = _streamingMsg.value ?: return@collect
               _streamingMsg.value = cur.copy(content = cur.content + chunk.text)
             }
+            "ui" -> {
+              val cur = _streamingMsg.value ?: return@collect
+              _streamingMsg.value = cur.copy(ui = (cur.ui + chunk.blocks).distinctBy { it.id }.take(8))
+            }
             "reasoning" -> {
               val cur = _streamingMsg.value ?: return@collect
               _streamingMsg.value = cur.copy(reasoning = cur.reasoning + (chunk.text ?: ""))
@@ -372,7 +385,7 @@ class ChatViewModel(
             }
             "done" -> {
               val done = _streamingMsg.value
-              if (done != null && done.content.isNotEmpty()) {
+              if (done != null && (done.content.isNotEmpty() || done.ui.isNotEmpty() || done.reasoning.isNotEmpty())) {
                 _messages.value = _messages.value + done
               }
               _streamingMsg.value = null
@@ -384,7 +397,7 @@ class ChatViewModel(
       // Fallback: if the stream closed without a 'done' event, promote whatever
       // was accumulated so the response is not silently dropped.
       val leftover = _streamingMsg.value
-      if (leftover != null && leftover.content.isNotEmpty()) {
+      if (leftover != null && (leftover.content.isNotEmpty() || leftover.ui.isNotEmpty() || leftover.reasoning.isNotEmpty())) {
         _messages.value = _messages.value + leftover
       }
       _streamingMsg.value = null
@@ -398,7 +411,7 @@ class ChatViewModel(
     job?.cancel()
     job = null
     val partial = _streamingMsg.value
-    if (partial != null && partial.content.isNotEmpty()) {
+    if (partial != null && (partial.content.isNotEmpty() || partial.ui.isNotEmpty() || partial.reasoning.isNotEmpty())) {
       _messages.value = _messages.value + partial
     }
     _streamingMsg.value = null
@@ -474,7 +487,7 @@ fun highlightPluginMentions(text: String, accent: Color): AnnotatedString {
     append(text)
     // All @plugin ids (§42) — an unstyled mention reads as plain text and users
     // report the plugin as "not showing", so every id must be covered here.
-    val pattern = Regex("@(github|gmail|leetcode|calendar|drive|docs|sheets|vercel|supabase)\\b", RegexOption.IGNORE_CASE)
+    val pattern = Regex("@(github|gmail|leetcode|calendar|drive|docs|sheets|vercel|supabase|browser)\\b", RegexOption.IGNORE_CASE)
     for (match in pattern.findAll(text)) {
       addStyle(SpanStyle(fontWeight = FontWeight.Bold, background = accent.copy(alpha = 0.30f)), match.range.first, match.range.last + 1)
     }
@@ -506,6 +519,81 @@ fun MarkdownBody(content: String, streaming: Boolean) {
     typography = markdownTypography(),
     modifier = Modifier.padding(vertical = 2.dp),
   )
+}
+
+@Composable
+fun GenerativeUiRenderer(
+  blocks: List<UiBlockDto>,
+  clipboard: androidx.compose.ui.platform.ClipboardManager,
+  onOpen: (String) -> Unit = {},
+) {
+  Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+    blocks.forEach { block ->
+      when (block.type) {
+        "summary" -> UiSummaryCard(block, clipboard, onOpen)
+        "metrics" -> UiMetricsCard(block, clipboard, onOpen)
+        "list" -> UiListCard(block, clipboard, onOpen)
+        "table" -> UiTableCard(block, clipboard, onOpen)
+      }
+    }
+  }
+}
+
+@Composable
+private fun UiCard(block: UiBlockDto, clipboard: androidx.compose.ui.platform.ClipboardManager, onOpen: (String) -> Unit, content: @Composable ColumnScope.() -> Unit) {
+  var expanded by remember(block.id) { mutableStateOf(false) }
+  Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh), modifier = Modifier.fillMaxWidth()) {
+    Column(Modifier.padding(14.dp)) {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(block.title ?: "Live data", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+        block.actions.forEach { action ->
+          TextButton(onClick = {
+            when (action.type) {
+              "copy" -> clipboard.setText(AnnotatedString(action.value ?: block.body ?: block.title.orEmpty()))
+              "open" -> action.value?.let(onOpen)
+              "expand", "filter" -> expanded = !expanded
+            }
+          }, modifier = Modifier.height(36.dp)) { Text(action.label, style = MaterialTheme.typography.labelSmall) }
+        }
+      }
+      if (expanded || block.actions.none { it.type == "expand" }) content()
+    }
+  }
+}
+
+@Composable private fun UiSummaryCard(block: UiBlockDto, clipboard: androidx.compose.ui.platform.ClipboardManager, onOpen: (String) -> Unit) = UiCard(block, clipboard, onOpen) {
+  Text(block.body.orEmpty(), style = MaterialTheme.typography.bodyMedium)
+  block.metadata.forEach { item ->
+    Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+      Text(item.label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Text(item.value ?: item.secondary.orEmpty(), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 12.dp))
+    }
+  }
+}
+@Composable private fun UiMetricsCard(block: UiBlockDto, clipboard: androidx.compose.ui.platform.ClipboardManager, onOpen: (String) -> Unit) = UiCard(block, clipboard, onOpen) {
+  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    block.metrics.forEach { metric ->
+      Column(Modifier.widthIn(min = 92.dp).semantics { contentDescription = "${metric.label}: ${metric.value}" }) {
+        Text(metric.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(metric.value, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        metric.change?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
+      }
+    }
+  }
+}
+@Composable private fun UiListCard(block: UiBlockDto, clipboard: androidx.compose.ui.platform.ClipboardManager, onOpen: (String) -> Unit) = UiCard(block, clipboard, onOpen) {
+  block.items.forEach { item ->
+    Column(Modifier.fillMaxWidth().padding(vertical = 5.dp).semantics { contentDescription = item.label }) {
+      Text(item.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+      item.secondary?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    }
+  }
+}
+@Composable private fun UiTableCard(block: UiBlockDto, clipboard: androidx.compose.ui.platform.ClipboardManager, onOpen: (String) -> Unit) = UiCard(block, clipboard, onOpen) {
+  Column(Modifier.horizontalScroll(rememberScrollState())) {
+    Row { block.columns.forEach { Text(it, Modifier.width(120.dp).padding(4.dp), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold) } }
+    block.rows.forEach { row -> Row { row.take(block.columns.size).forEach { Text(it, Modifier.width(120.dp).padding(4.dp), style = MaterialTheme.typography.bodySmall) } } }
+  }
 }
 
 @Composable
@@ -546,7 +634,7 @@ private fun TypingIndicator(modifier: Modifier = Modifier) {
 
 
 @Composable
-fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit = {}, onConnectionsClick: () -> Unit = {}, onAllChatsClick: () -> Unit = {}, vm: ChatViewModel = viewModel()) {
+fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit = {}, onConnectionsClick: () -> Unit = {}, onAgentsClick: () -> Unit = {}, onActivityClick: () -> Unit = {}, onAllChatsClick: () -> Unit = {}, vm: ChatViewModel = viewModel()) {
   LaunchedEffect(session) { vm.configureSession(session) }
   LaunchedEffect(api) { vm.configureApi(api) }
   var conversations by remember { mutableStateOf<List<ConversationDto>>(emptyList()) }
@@ -582,8 +670,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   LaunchedEffect(Unit) {
     runCatching { models = api.models().models }
     loadConversations(reset = true)
-    runCatching {
-      vm.setConversation(api.createConversation().id)
+    if (vm.activeConversationId.value == null) {
+      runCatching { vm.setConversation(api.createConversation().id) }
     }
   }
   val messages by vm.messages.collectAsState()
@@ -598,6 +686,23 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   val listState = rememberLazyListState()
   val scope = rememberCoroutineScope()
   val drawerState = rememberDrawerState(DrawerValue.Closed)
+  var creatingChat by remember { mutableStateOf(false) }
+
+  // Both new-chat controls share this guard so rapid taps cannot create a
+  // pile of empty conversations while the first request is still in flight.
+  fun createFreshChat() {
+    if (creatingChat) return
+    creatingChat = true
+    scope.launch {
+      runCatching { api.createConversation() }
+        .onSuccess { created ->
+          vm.newChat(created.id)
+          loadConversations(reset = true)
+        }
+        .onFailure { vm.clearError() }
+      creatingChat = false
+    }
+  }
 
   val voice = remember { AndroidVoiceInput(context) { input = it } }
   var micGranted by remember {
@@ -661,51 +766,80 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
       ModalDrawerSheet(
         drawerContainerColor = if (isSystemInDarkTheme()) NovaPalette.GlassScrimDark else scheme.surface,
         drawerContentColor = scheme.onSurface,
-        modifier = Modifier.width(300.dp),
+        modifier = Modifier.width(320.dp),
       ) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
           Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("Library", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleLarge, color = scheme.onSurface, modifier = Modifier.weight(1f))
-            IconButton(onClick = { scope.launch { drawerState.close() }; onSettingsClick() }, modifier = Modifier.size(32.dp)) {
+            Column(Modifier.weight(1f)) {
+              Text("Library", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineSmall, color = scheme.onSurface)
+              Text("Your recent conversations", style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
+            }
+            IconButton(onClick = { scope.launch { drawerState.close() }; onSettingsClick() }, modifier = Modifier.size(44.dp)) {
               Icon(Icons.Default.Settings, contentDescription = "Settings", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
             }
           }
-          Spacer(Modifier.height(2.dp))
-          Text(
-            "${conversations.size} of $convTotal conversations",
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = NovaMono,
-            color = scheme.onSurfaceVariant,
-          )
+          Spacer(Modifier.height(16.dp))
+          FilledTonalButton(
+            onClick = {
+              createFreshChat()
+              scope.launch { drawerState.close() }
+            },
+            enabled = !creatingChat,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            shape = RoundedCornerShape(16.dp),
+          ) {
+            if (creatingChat) {
+              CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = scheme.primary)
+            } else {
+              Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+            }
+            Spacer(Modifier.width(8.dp))
+            Text("New chat", fontWeight = FontWeight.SemiBold)
+          }
         }
         HorizontalDivider(color = scheme.outlineVariant)
+        Row(
+          Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Text("RECENT", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
+          Spacer(Modifier.weight(1f))
+          Text("${conversations.size} of $convTotal", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
+        }
         val drawerListState = rememberLazyListState()
-        LazyColumn(state = drawerListState, modifier = Modifier.weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) {
+        LazyColumn(state = drawerListState, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp)) {
+          if (conversations.isEmpty() && !convLoading) {
+            item {
+              Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 28.dp)) {
+                Text("Nothing here yet", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
+                Spacer(Modifier.height(4.dp))
+                Text("Start a conversation and it will appear here.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+              }
+            }
+          }
           items(conversations.size) { idx ->
             val c = conversations[idx]
+            val selected = activeConversationId == c.id
             Row(
               Modifier
                 .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(if (selected) scheme.primaryContainer.copy(alpha = 0.72f) else Color.Transparent)
                 .clickable {
                   scope.launch {
                     runCatching {
                       val detail = api.conversation(c.id)
-                      vm.openConversation(c.id, detail.messages.map { Message(it.id, it.role, it.content, it.attachments) })
+                      vm.openConversation(c.id, detail.messages.map { Message(it.id, it.role, it.content, it.attachments, ui = it.ui) })
                     }
                     drawerState.close()
                   }
                 }
-                .padding(horizontal = 20.dp, vertical = 11.dp),
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
               verticalAlignment = Alignment.CenterVertically,
             ) {
-              Text(
-                "${(idx + 1).toString().padStart(2, '0')}",
-                fontFamily = NovaMono,
-                style = MaterialTheme.typography.labelSmall,
-                color = scheme.primary,
-                modifier = Modifier.width(28.dp),
-              )
-              Text(c.title, maxLines = 1, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface, modifier = Modifier.weight(1f))
+              Box(Modifier.size(8.dp).background(if (selected) scheme.primary else scheme.outlineVariant, CircleShape))
+              Spacer(Modifier.width(12.dp))
+              Text(c.title.ifBlank { "New chat" }, maxLines = 1, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface, modifier = Modifier.weight(1f))
               IconButton(
                 onClick = {
                   scope.launch {
@@ -714,15 +848,14 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                       conversations = conversations.filter { it.id != c.id }
                       convTotal = (convTotal - 1).coerceAtLeast(0)
                       if (activeConversationId == c.id) {
-                        val created = api.createConversation()
-                        vm.newChat(created.id)
+                        createFreshChat()
                       }
                     }
                   }
                 },
-                modifier = Modifier.size(28.dp),
+                modifier = Modifier.size(44.dp),
               ) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = scheme.error.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.Delete, contentDescription = "Delete ${c.title.ifBlank { "chat" }}", tint = scheme.error.copy(alpha = 0.7f), modifier = Modifier.size(17.dp))
               }
             }
           }
@@ -761,27 +894,37 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           Text("$convTotal", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
           Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
         }
-        HorizontalDivider(color = scheme.outlineVariant)
         Row(
-          Modifier
-            .fillMaxWidth()
-            .clickable {
-              scope.launch {
-                runCatching {
-                  val created = api.createConversation()
-                  vm.newChat(created.id)
-                  loadConversations(reset = true)
-                }
-                drawerState.close()
-              }
-            }
+          Modifier.fillMaxWidth().clickable { scope.launch { drawerState.close() }; onAgentsClick() }
             .padding(horizontal = 20.dp, vertical = 14.dp),
           verticalAlignment = Alignment.CenterVertically,
         ) {
-          Icon(Icons.Default.Add, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(18.dp))
+          Icon(Icons.Default.AccountTree, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(18.dp))
           Spacer(Modifier.width(10.dp))
-          Text("Start a fresh chat", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface)
+          Text("Agents", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface, modifier = Modifier.weight(1f))
+          Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
         }
+        Row(
+          Modifier.fillMaxWidth().clickable { scope.launch { drawerState.close() }; onActivityClick() }
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Icon(Icons.Default.History, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(18.dp))
+          Spacer(Modifier.width(10.dp))
+          Text("Activity", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface, modifier = Modifier.weight(1f))
+          Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+        }
+        Row(
+          Modifier.fillMaxWidth().clickable { scope.launch { drawerState.close() }; onConnectionsClick() }
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Icon(Icons.Default.Settings, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(18.dp))
+          Spacer(Modifier.width(10.dp))
+          Text("Connections", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface, modifier = Modifier.weight(1f))
+          Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+        }
+        HorizontalDivider(color = scheme.outlineVariant)
       }
     },
   ) {
@@ -828,16 +971,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             }
           }
           if (messages.isNotEmpty()) {
-            IconButton(onClick = {
-              scope.launch {
-                runCatching {
-                  val created = api.createConversation()
-                  vm.newChat(created.id)
-                  loadConversations(reset = true)
-                }
+            IconButton(onClick = ::createFreshChat, enabled = !creatingChat) {
+              if (creatingChat) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = scheme.primary)
+              } else {
+                Icon(Icons.Default.Edit, contentDescription = "New chat", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
               }
-            }) {
-              Icon(Icons.Default.Edit, contentDescription = "New chat", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
             }
           }
         }
@@ -877,6 +1016,19 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               style = MaterialTheme.typography.bodyMedium,
               color = scheme.onSurfaceVariant,
             )
+            Spacer(Modifier.height(18.dp))
+            Row(
+              Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              listOf("Summarize a file", "Plan my day", "Help me think").forEach { prompt ->
+                AssistChip(
+                  onClick = { input = prompt },
+                  label = { Text(prompt, style = MaterialTheme.typography.labelMedium) },
+                  shape = RoundedCornerShape(12.dp),
+                )
+              }
+            }
           }
         }
       }
@@ -995,6 +1147,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               }
               Spacer(Modifier.height(6.dp))
               MarkdownBody(m.content, false)
+              if (m.ui.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                GenerativeUiRenderer(m.ui, clipboard) { url ->
+                  if (url.startsWith("https://")) context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                }
+              }
               Spacer(Modifier.height(2.dp))
               Row(Modifier.offset(x = (-8).dp)) {
                 BareAction(Icons.Default.ContentCopy, "Copy") { clipboard.setText(AnnotatedString(m.content)) }
@@ -1103,6 +1261,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             } else if (sm.content.isNotEmpty()) {
               MarkdownBody(sm.content, true)
             }
+            if (sm.ui.isNotEmpty()) {
+              Spacer(Modifier.height(8.dp))
+              GenerativeUiRenderer(sm.ui, clipboard) { url ->
+                if (url.startsWith("https://")) context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+              }
+            }
           }
         }
       }
@@ -1141,7 +1305,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           ) {
             Text(p.filename, maxLines = 1, fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurface, modifier = Modifier.widthIn(max = 160.dp))
             Spacer(Modifier.width(8.dp))
-            Icon(Icons.Default.ContentCopy, contentDescription = "Remove", modifier = Modifier.size(12.dp), tint = scheme.onSurfaceVariant)
+            Icon(Icons.Default.Close, contentDescription = "Remove attachment", modifier = Modifier.size(14.dp), tint = scheme.onSurfaceVariant)
           }
         }
       }
@@ -1259,12 +1423,15 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                   colors = IconButtonDefaults.filledIconButtonColors(containerColor = scheme.error, contentColor = scheme.surface),
                   modifier = Modifier.size(44.dp),
                 ) {
-                  Icon(Icons.Default.Refresh, contentDescription = "Stop", modifier = Modifier.size(18.dp))
+                  Icon(Icons.Default.Stop, contentDescription = "Stop generating", modifier = Modifier.size(18.dp))
                 }
               } else {
                 FilledIconButton(
-                  onClick = { vm.send(input); input = "" },
-                  enabled = input.isNotBlank(),
+                  onClick = {
+                    vm.send(input)
+                    input = ""
+                  },
+                  enabled = input.isNotBlank() && activeConversationId != null && !uploading,
                   colors = IconButtonDefaults.filledIconButtonColors(containerColor = scheme.primary, contentColor = scheme.onPrimary, disabledContainerColor = scheme.outlineVariant),
                   modifier = Modifier.size(44.dp),
                 ) {
@@ -1280,7 +1447,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   }
 }
 
-@Composable fun AgentsScreen(api: NovaApi) {
+@Composable fun AgentsScreen(api: NovaApi, onBack: () -> Unit = {}) {
   val scope = rememberCoroutineScope()
   var agents by remember { mutableStateOf<List<com.nova.app.data.AgentDto>>(emptyList()) }
   var loading by remember { mutableStateOf(true) }
@@ -1312,6 +1479,11 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     verticalArrangement = Arrangement.spacedBy(14.dp),
   ) {
     item {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onBack, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+        Text("Agents", style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant)
+      }
+      Spacer(Modifier.height(4.dp))
       Text("$live live", fontFamily = NovaMono, style = MaterialTheme.typography.labelMedium, color = scheme.primary)
       Spacer(Modifier.height(6.dp))
       Text("Agents at work.", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineLarge, color = scheme.onSurface)
@@ -1511,7 +1683,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   }
 }
 
-@Composable fun ActivityScreen(api: NovaApi) {
+@Composable fun ActivityScreen(api: NovaApi, onBack: () -> Unit = {}) {
   val scope = rememberCoroutineScope()
   var executions by remember { mutableStateOf<List<com.nova.app.data.ExecutionDto>>(emptyList()) }
   var loading by remember { mutableStateOf(true) }
@@ -1539,6 +1711,11 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     item {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onBack, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+        Text("Activity", style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant)
+      }
+      Spacer(Modifier.height(4.dp))
       Text("${executions.size} runs", fontFamily = NovaMono, style = MaterialTheme.typography.labelMedium, color = scheme.primary)
       Spacer(Modifier.height(6.dp))
       Text("What happened.", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineLarge, color = scheme.onSurface)
@@ -1648,7 +1825,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   fun open(c: ConversationDto) {
     scope.launch {
       runCatching { api.conversation(c.id) }
-        .onSuccess { onOpen(c.id, it.messages.map { m -> Message(m.id, m.role, m.content, m.attachments) }) }
+        .onSuccess { onOpen(c.id, it.messages.map { m -> Message(m.id, m.role, m.content, m.attachments, ui = m.ui) }) }
         .onFailure { error = "Could not open chat" }
     }
   }
@@ -1660,7 +1837,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     item {
       Row(verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onBack, modifier = Modifier.size(36.dp)) {
-          Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Back", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
+          Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
         }
         Spacer(Modifier.width(4.dp))
         Column {
@@ -1723,7 +1900,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   }
 }
 
-@Composable fun ConnectionsScreen(api: NovaApi, session: SessionToken) {
+@Composable fun ConnectionsScreen(api: NovaApi, session: SessionToken, onBack: () -> Unit = {}) {
   val scope = rememberCoroutineScope()
   val context = LocalContext.current
   val scheme = MaterialTheme.colorScheme
@@ -1770,6 +1947,11 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     item {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onBack, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+        Text("Connections", style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant)
+      }
+      Spacer(Modifier.height(4.dp))
       Text("$live of ${providers.size} live", fontFamily = NovaMono, style = MaterialTheme.typography.labelMedium, color = scheme.primary)
       Spacer(Modifier.height(6.dp))
       Text("Tied together.", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineLarge, color = scheme.onSurface)
@@ -1988,6 +2170,20 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   val displayEmail = if (rawEmail != null && rawEmail.contains("@")) rawEmail else "Signed in"
   val initial = displayEmail.take(1).uppercase()
   val scheme = MaterialTheme.colorScheme
+  var showSignOutConfirm by remember { mutableStateOf(false) }
+
+  // Permission can change in Android system settings while this screen is
+  // paused. Refresh the switch when the user returns so it never lies.
+  val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+  DisposableEffect(lifecycleOwner) {
+    val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+      if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && Build.VERSION.SDK_INT >= 33) {
+        granted = context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+      }
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+  }
 
   LazyColumn(
     modifier = Modifier.fillMaxSize().background(scheme.surface).padding(horizontal = 20.dp),
@@ -1997,7 +2193,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     item {
       Row(verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onBack, modifier = Modifier.size(36.dp)) {
-          Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Back", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
+          Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
         }
         Spacer(Modifier.width(4.dp))
         Text("Settings", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineLarge, color = scheme.onSurface)
@@ -2016,13 +2212,13 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             Spacer(Modifier.height(2.dp))
             Text(displayEmail, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, maxLines = 1)
           }
-          Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+          Text("Signed in", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.secondary)
         }
       }
     }
 
     item {
-      Text("Model & accounts", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+      Text("MODEL & ACCOUNTS", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = scheme.primary, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
     }
 
     item {
@@ -2039,7 +2235,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           HorizontalDivider(color = scheme.outlineVariant)
           // Connected accounts — one tap to the Connections screen (§38).
           Row(
-            Modifier.fillMaxWidth().clickable { onConnectionsClick() }.padding(horizontal = 20.dp, vertical = 16.dp),
+            Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable { onConnectionsClick() }.padding(horizontal = 20.dp, vertical = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
           ) {
             Column(modifier = Modifier.weight(1f)) {
@@ -2047,14 +2243,14 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               Spacer(Modifier.height(2.dp))
               Text("GitHub, Gmail, Calendar, Drive, Docs, Sheets, Vercel, Supabase, LeetCode", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
             }
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+          Text("Active", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.secondary)
           }
         }
       }
     }
 
     item {
-      Text("How Nova reaches you", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+      Text("HOW NOVA REACHES YOU", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = scheme.primary, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
     }
 
     item {
@@ -2075,9 +2271,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                 checked = granted,
                 onCheckedChange = { on ->
                   if (on) request.launch(Manifest.permission.POST_NOTIFICATIONS)
-                  else context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                    putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
-                  })
+                  else {
+                    granted = false
+                    context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                      putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    })
+                  }
                 },
               )
             } else {
@@ -2091,14 +2290,14 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               Spacer(Modifier.height(2.dp))
               Text("Nova voice, on tap of any answer", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
             }
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            Text("On tap", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
           }
         }
       }
     }
 
     item {
-      Text("Accent", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+      Text("ACCENT", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = scheme.primary, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
     }
 
     item {
@@ -2131,6 +2330,11 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                     .size(44.dp)
                     .clip(CircleShape)
                     .background(previewColor)
+                    .semantics {
+                      contentDescription = "${accent.label} accent${if (selected) ", selected" else ""}"
+                      role = Role.RadioButton
+                      stateDescription = if (selected) "Selected" else "Not selected"
+                    }
                     .clickable {
                       AccentPreferences.set(context, accent.name)
                       onAccentChanged()
@@ -2160,7 +2364,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     }
 
     item {
-      Text("About this copy", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+      Text("ABOUT THIS COPY", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = scheme.primary, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
     }
 
     item {
@@ -2181,10 +2385,26 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     }
 
     item {
-      TextButton(onClick = onLogout, modifier = Modifier.fillMaxWidth()) {
+      TextButton(onClick = { showSignOutConfirm = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         Text("Sign out", color = scheme.error, fontWeight = FontWeight.SemiBold)
       }
     }
+  }
+
+  if (showSignOutConfirm) {
+    AlertDialog(
+      onDismissRequest = { showSignOutConfirm = false },
+      title = { Text("Sign out of Nova?", fontFamily = NovaDisplay) },
+      text = { Text("You can sign back in anytime. Your conversations remain on your account.", color = scheme.onSurfaceVariant) },
+      confirmButton = {
+        TextButton(onClick = { showSignOutConfirm = false; onLogout() }) {
+          Text("Sign out", color = scheme.error, fontWeight = FontWeight.SemiBold)
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showSignOutConfirm = false }) { Text("Cancel", color = scheme.onSurfaceVariant) }
+      },
+    )
   }
 }
 

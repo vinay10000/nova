@@ -13,7 +13,7 @@ export { MODELS };
 export class GeminiProvider implements AIProvider {
   private client: GoogleGenAI;
 
-  constructor(apiKey = process.env.GEMINI_API_KEY ?? '') {
+  constructor(apiKey = process.env.GEMINI_API_KEY ?? process.env.AI_API_KEY ?? '') {
     if (!apiKey) console.warn('[gemini] GEMINI_API_KEY missing — chat fails until set server-side.');
     this.client = new GoogleGenAI({ apiKey });
   }
@@ -26,26 +26,31 @@ export class GeminiProvider implements AIProvider {
    * and turns needing action close with NO `interaction.completed`, so the turn end
    * is detected by stream close with the id from `interaction.created`.
    */
-  async *streamChat(
+  /** Retry transient Gemini capacity failures on the other supported model. */
+  async *streamChat(messages: ChatMessage[], opts?: StreamChatOptions): AsyncGenerator<StreamChunk> {
+    const selected = opts?.model && new Set(Object.values(MODELS)).has(opts.model)
+      ? opts.model
+      : MODELS.chat;
+    const fallback = selected === MODELS.chat ? MODELS.vision : MODELS.chat;
+    try {
+      yield* this.streamChatOnce(messages, opts);
+    } catch (err) {
+      if (!isTransientGeminiError(err) || selected === fallback) throw err;
+      console.warn(`[gemini] ${selected} is busy; retrying with ${fallback}`);
+      yield* this.streamChatOnce(messages, { ...opts, model: fallback });
+    }
+  }
+
+  private async *streamChatOnce(
     messages: ChatMessage[],
-    opts?: {
-      model?: string;
-      tools?: ToolDef[];
-      previousInteractionId?: string;
-      functionResults?: FunctionResultInput[];
-      signal?: AbortSignal;
-      /** §9 inline image/document parts on the last user turn. */
-      attachments?: InlinePart[];
-      /** §9 server-side extracted document text. */
-      extractedText?: string;
-    },
+    opts?: StreamChatOptions,
   ): AsyncGenerator<StreamChunk> {
     opts?.signal?.throwIfAborted?.();
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
     const turns = messages.filter((m) => m.role !== 'system');
 
-    // Guard against stale model ids saved by older clients (e.g. router-era
-    // 'qwen/...' ids) — they 404 the whole turn. Only known models pass.
+    // Guard against stale model ids saved by older clients — only the two
+    // Gemini models in the registry pass.
     const allowed = new Set<string>(Object.values(MODELS));
     const model = opts?.model && allowed.has(opts.model) ? opts.model : MODELS.chat;
     const stream = (await this.client.interactions.create({
@@ -165,6 +170,23 @@ export interface FunctionResultInput {
   call_id: string;
   result: string;
   is_error?: boolean;
+}
+
+interface StreamChatOptions {
+  model?: string;
+  tools?: ToolDef[];
+  previousInteractionId?: string;
+  functionResults?: FunctionResultInput[];
+  signal?: AbortSignal;
+  /** §9 inline image/document parts on the last user turn. */
+  attachments?: InlinePart[];
+  /** §9 server-side extracted document text. */
+  extractedText?: string;
+}
+
+function isTransientGeminiError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /429|500|502|503|504|high demand|temporarily unavailable|rate.?limit|quota/i.test(message);
 }
 
 /**

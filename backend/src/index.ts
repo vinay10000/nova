@@ -66,8 +66,8 @@ if (!process.env.DATABASE_URL) {
 if (!process.env.AUTH_JWT_SECRET || process.env.AUTH_JWT_SECRET === 'change-me' || process.env.AUTH_JWT_SECRET === 'dev-only-change-me') {
   throw new Error('AUTH_JWT_SECRET must be set to a real secret');
 }
-if (!process.env.AI_API_KEY) {
-  app.log.warn('[config] AI_API_KEY is not set — chat features will fail.');
+if (!process.env.GEMINI_API_KEY && !process.env.AI_API_KEY) {
+  app.log.warn('[config] GEMINI_API_KEY/AI_API_KEY is not set — chat features will fail.');
 }
 
 // Prisma 7 requires a driver adapter; pg connects directly to Postgres.
@@ -232,7 +232,20 @@ app.get('/v1/conversations/:id', async (req, reply) => {
       },
     },
   });
-  return conv ?? reply.code(404).send({ error: 'not_found' });
+  if (!conv) return reply.code(404).send({ error: 'not_found' });
+  return {
+    id: conv.id,
+    title: conv.title,
+    messages: conv.messages.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      attachments: m.attachments,
+      ui: (m.metadata && typeof m.metadata === 'object' && !Array.isArray(m.metadata) && 'ui' in m.metadata)
+        ? (m.metadata as { ui?: unknown }).ui ?? []
+        : [],
+    })),
+  };
 });
 
 app.patch('/v1/conversations/:id', async (req, reply) => {

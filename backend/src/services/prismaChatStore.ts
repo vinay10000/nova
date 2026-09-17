@@ -15,10 +15,10 @@ export function prismaChatStore(db: PrismaClient): ChatStore {
       return rows;
     },
 
-    async appendMessage(conversationId, userId, role, content, model) {
+    async appendMessage(conversationId, userId, role, content, model, metadata) {
       const conv = await db.conversation.findFirst({ where: { id: conversationId, userId } });
       if (!conv) throw new ConversationNotFoundError();
-      const msg = await db.message.create({ data: { conversationId, role, content, model } });
+      const msg = await db.message.create({ data: { conversationId, role, content, model, metadata: metadata as object | undefined } });
       await db.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
       return msg.id;
     },

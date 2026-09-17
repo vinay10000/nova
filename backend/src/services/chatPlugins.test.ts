@@ -38,6 +38,8 @@ for (const plugin of chatPlugins) {
   assert.equal(detectPlugin('show me my github issues', new Set(['github']))?.plugin.id, 'github');
   // LeetCode and web search run on backend keys, so they are always usable.
   assert.equal(detectPlugin('what is the leetcode daily challenge', none)?.plugin.id, 'leetcode');
+  assert.equal(detectPlugin('@browser research this page', none)?.plugin.id, 'browser');
+  assert.equal(detectPlugin('open browser and research the latest trend', none)?.plugin.id, 'browser');
 }
 
 // 4. Readiness drives the picker, and LeetCode never needs a connection.
@@ -67,6 +69,7 @@ for (const plugin of chatPlugins) {
 // 6. Server-keyed tools must never demand a Connection row.
 assert.equal(isServerKeyedTool('leetcode_get_solved'), true);
 assert.equal(isServerKeyedTool('web_search'), true);
+assert.equal(isServerKeyedTool('browser_open'), true);
 assert.equal(isServerKeyedTool('github_list_issues'), false);
 assert.equal(isServerKeyedTool('calendar_list_events'), false);
 

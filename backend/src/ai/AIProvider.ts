@@ -23,6 +23,7 @@ export type StreamChunk =
   /** §38/§47: actionable non-fatal notice — e.g. "reconnect github". */
   | { type: 'notice'; code: 'reconnect' | 'retry' | 'plugin'; provider?: string; message?: string }
   | { type: 'approval'; approvalId: string; toolId: string; payload: unknown }
+  | { type: 'ui'; blocks: UiBlock[] }
   | { type: 'error'; code: string; message?: string; retryable?: boolean }
   | { type: 'done'; interactionId?: string };
 
@@ -51,3 +52,4 @@ export interface AIProvider {
   generateAgentConfig(naturalLanguage: string, knownTools?: string[]): Promise<unknown>; // §12-§14 conversational builder
   titleFor(firstUserMessage: string): Promise<string>; // §8 auto-title
 }
+import type { UiBlock } from '../ui/UiBlocks.js';

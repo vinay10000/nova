@@ -2,10 +2,11 @@ import type { AIProvider, ChatMessage, InlinePart, StreamChunk } from '../ai/AIP
 import type { PrismaClient } from '@prisma/client';
 import { detectPlugin, pluginToolDefs, executePluginTool, MAX_PLUGIN_STEPS, connectedProviders, isPluginUsable, type ChatPlugin } from './chatPlugins.js';
 import { MODELS } from '../ai/models.js';
+import { uiBlocksFromToolResult, type UiBlock } from '../ui/UiBlocks.js';
 
 export interface ChatStore {
   loadMessages(conversationId: string, userId: string): Promise<{ role: string; content: string }[]>;
-  appendMessage(conversationId: string, userId: string, role: string, content: string, model?: string): Promise<string>;
+  appendMessage(conversationId: string, userId: string, role: string, content: string, model?: string, metadata?: unknown): Promise<string>;
   titleConversation(conversationId: string, userId: string, title: string): Promise<void>;
 }
 
@@ -102,7 +103,12 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
       const systemMessage = activePlugin ? activePlugin.systemInstruction : undefined;
 
       let full = '';
+      let uiBlocks: UiBlock[] = [];
       let toolSteps = 0;
+      // Gemini's Interactions API requires the interaction that produced a
+      // function call on the next function_result request. Keep it across the
+      // bounded plugin loop instead of starting a disconnected upstream turn.
+      let previousInteractionId: string | undefined;
 
       // §42: tool loop for plugins — stream, execute tools, feed back, repeat.
       // Bounded by MAX_PLUGIN_STEPS to keep chat responsive (§46).
@@ -122,12 +128,14 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
           attachments: inlineParts,
           extractedText,
         };
+        if (previousInteractionId) streamOpts.previousInteractionId = previousInteractionId;
         if (pluginTools?.length) streamOpts.tools = pluginTools;
         if (pendingResults?.length) streamOpts.functionResults = pendingResults;
 
         pendingResults = undefined;
         let sawToolCall = false;
         const toolCalls: { toolId: string; callId: string; args: unknown }[] = [];
+        let completionChunk: StreamChunk | undefined;
 
         for await (const chunk of ai.streamChat(currentMessages, streamOpts as Parameters<AIProvider['streamChat']>[1])) {
           if (signal?.aborted) break;
@@ -141,8 +149,11 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
             // Yield a step event so the UI can show "Checking GitHub..."
             yield { type: 'step', label: chunk.toolId };
           } else if (chunk.type === 'done') {
-            // Forward done to the client so the UI can finalize the streaming message.
-            yield chunk;
+            // A provider turn can finish because it emitted a tool call. Do
+            // not close the client stream until the tool result has been fed
+            // back and the final natural-language response is complete.
+            previousInteractionId = chunk.interactionId ?? previousInteractionId;
+            completionChunk = chunk;
           } else if (chunk.type === 'error') {
             yield chunk;
             return;
@@ -150,7 +161,10 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
         }
 
         // If no tool calls, we're done — the model produced a text response
-        if (!sawToolCall || !toolCalls.length) break;
+        if (!sawToolCall || !toolCalls.length) {
+          if (completionChunk) yield completionChunk;
+          break;
+        }
         if (toolSteps >= MAX_PLUGIN_STEPS) {
           yield { type: 'step', label: 'Plugin step limit reached' };
           break;
@@ -161,6 +175,13 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
           const results: { type: 'function_result'; name: string; call_id: string; result: string; is_error?: boolean }[] = [];
           for (const tc of toolCalls) {
             const { result, isError, reconnect, retryable } = await executePluginTool(db, userId, tc.toolId, tc.args);
+            if (!isError) {
+              const blocks = uiBlocksFromToolResult(tc.toolId, result);
+              if (blocks.length) {
+                uiBlocks = [...uiBlocks, ...blocks].slice(0, 8);
+                yield { type: 'ui', blocks };
+              }
+            }
             results.push({
               type: 'function_result',
               name: tc.toolId,
@@ -208,7 +229,7 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
       }
 
       // Persist only real content — never an empty assistant row on a failed stream.
-      if (full.trim()) await store.appendMessage(conversationId, userId, 'model', full, model);
+      if (full.trim()) await store.appendMessage(conversationId, userId, 'model', full, model, uiBlocks.length ? { ui: uiBlocks } : undefined);
     },
   };
 }

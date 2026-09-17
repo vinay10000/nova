@@ -46,7 +46,7 @@ paths:
     delete: { summary: Delete (§8), responses: { '200': { description: ok } } }
   /v1/chat/stream:
     post:
-      summary: Streaming chat (SSE) — §3 normal chat, §10 attachments via attachmentIds
+      summary: Streaming chat (SSE) — §3 normal chat, §10 attachments, and validated tool-backed UI blocks
       requestBody:
         content:
           application/json:
@@ -58,7 +58,14 @@ paths:
                 message: { type: string, maxLength: 32000 }
                 model: { type: string }
                 attachmentIds: { type: array, items: { type: string }, maxItems: 5 }
-      responses: { '200': { description: text/event-stream } }
+      responses:
+        '200':
+          description: text/event-stream; events include token, reasoning, step, ui, done, and error
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: 'data: {"type":"ui","blocks":[{"type":"metrics","id":"issues-metrics","metrics":[{"label":"open","value":"3"}]}]}'
   /v1/files:
     post:
       summary: Upload file (§10) — multipart, magic-byte sniff, 20MB cap; returns metadata only

@@ -40,6 +40,8 @@ fun NovaNav(session: SessionToken, onAccentChanged: () -> Unit = {}) {
           api, session,
           onSettingsClick = { nav.navigate("settings") },
           onConnectionsClick = { nav.navigate("connections") },
+          onAgentsClick = { nav.navigate("agents") },
+          onActivityClick = { nav.navigate("activity") },
           onAllChatsClick = { nav.navigate("allchats") },
           vm = chatVm,
         )
@@ -66,21 +68,21 @@ fun NovaNav(session: SessionToken, onAccentChanged: () -> Unit = {}) {
         exitTransition = { fadeOut(tween(150)) },
         popEnterTransition = { fadeIn(tween(200)) },
         popExitTransition = { fadeOut(tween(150)) },
-      ) { AgentsScreen(api) }
+      ) { AgentsScreen(api, onBack = { nav.popBackStack() }) }
       composable(
         "activity",
         enterTransition = { fadeIn(tween(200)) },
         exitTransition = { fadeOut(tween(150)) },
         popEnterTransition = { fadeIn(tween(200)) },
         popExitTransition = { fadeOut(tween(150)) },
-      ) { ActivityScreen(api) }
+      ) { ActivityScreen(api, onBack = { nav.popBackStack() }) }
       composable(
         "connections",
         enterTransition = { fadeIn(tween(200)) },
         exitTransition = { fadeOut(tween(150)) },
         popEnterTransition = { fadeIn(tween(200)) },
         popExitTransition = { fadeOut(tween(150)) },
-      ) { ConnectionsScreen(api, session) }
+      ) { ConnectionsScreen(api, session, onBack = { nav.popBackStack() }) }
       composable(
         "settings",
         enterTransition = { fadeIn(tween(200)) },
