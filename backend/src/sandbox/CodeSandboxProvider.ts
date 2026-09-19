@@ -10,8 +10,38 @@ export interface CodeSandboxProvider {
   create(): Promise<{ sandboxId: string }>;
   writeFile(sandboxId: string, path: string, content: string): Promise<unknown>;
   readFile(sandboxId: string, path: string): Promise<{ content: string }>;
+  listFiles(sandboxId: string, path?: string): Promise<{ files: { name: string; path: string; isDir: boolean }[] }>;
   run(sandboxId: string, command: string, timeoutMs?: number): Promise<{ stdout: string; stderr: string; exitCode: number }>;
   destroy(sandboxId: string): Promise<void>;
+}
+
+/**
+ * Sandboxes created per agent run, keyed by agentId. registerSandbox() is called by the
+ * workspace_create/browser_task tools; executeAgent() drains the agent's set in a finally
+ * block and kills every id — an agent that forgets workspace_destroy must never leak a
+ * paid sandbox past its run. ponytail: keyed by agentId (not executionId) because
+ * ToolContext carries agentId; two concurrent runs of the SAME agent share a bucket and
+ * both get cleaned at the first finish — acceptable on the free tier, upgrade path is
+ * threading executionId through ToolContext.
+ */
+const ownedSandboxes = new Map<string, Set<string>>();
+export function registerSandbox(agentId: string, sandboxId: string): void {
+  if (!/^[A-Za-z0-9_-]{4,128}$/.test(sandboxId)) return;
+  const set = ownedSandboxes.get(agentId) ?? new Set<string>();
+  set.add(sandboxId);
+  ownedSandboxes.set(agentId, set);
+}
+export async function cleanupSandboxes(agentId: string): Promise<string[]> {
+  const ids = [...(ownedSandboxes.get(agentId) ?? [])];
+  ownedSandboxes.delete(agentId);
+  await Promise.all(ids.map((id) => Sandbox.kill(id).catch(() => {})));
+  return ids;
+}
+export function unregisterSandbox(agentId: string, sandboxId: string): void {
+  const set = ownedSandboxes.get(agentId);
+  if (!set) return;
+  set.delete(sandboxId);
+  if (!set.size) ownedSandboxes.delete(agentId);
 }
 
 function assertId(id: unknown): string {
@@ -55,6 +85,20 @@ export class E2BSandboxProvider implements CodeSandboxProvider {
     const sbx = await Sandbox.connect(id);
     const content = await sbx.files.read(p);
     return { content: String(content ?? '').slice(0, 50_000) };
+  }
+
+  async listFiles(sandboxId: string, path?: string): Promise<{ files: { name: string; path: string; isDir: boolean }[] }> {
+    requireKey();
+    const id = assertId(sandboxId);
+    const sbx = await Sandbox.connect(id);
+    const entries = await sbx.files.list(path ? assertPath(path) : '.');
+    return {
+      files: (entries ?? []).slice(0, 200).map((e) => ({
+        name: e.name,
+        path: (e as { path?: string }).path ?? e.name,
+        isDir: e.type === 'dir',
+      })),
+    };
   }
 
   async run(sandboxId: string, command: string, timeoutMs = 60_000): Promise<{ stdout: string; stderr: string; exitCode: number }> {

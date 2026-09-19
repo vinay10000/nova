@@ -30,7 +30,7 @@ export type UiBlock = z.infer<typeof uiBlockSchema>;
 const PRESENTABLE_READ_TOOLS = new Set([
   'github_list_issues', 'github_list_repositories', 'github_list_pull_requests', 'github_get_notifications',
   'gmail_list_messages', 'calendar_list_events', 'drive_list', 'leetcode_get_solved',
-  'browser_open',
+  'browser_open', 'browser_scrape',
 ]);
 const text = (value: unknown, fallback = ''): string =>
   typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? String(value) : fallback;
@@ -54,6 +54,17 @@ export function uiBlocksFromToolResult(toolId: string, result: string): UiBlock[
   if (toolId === 'browser_open' && typeof record.text === 'string' && record.text.trim()) {
     return uiBlocksSchema.parse([{ type: 'summary', id: `${toolId}-summary`, title: 'Web research', body: record.text.slice(0, 2_000) }]);
   }
+  // browser_scrape result { url, data: { selector: [texts] } } → one list per selector.
+  if (toolId === 'browser_scrape' && record.data && typeof record.data === 'object' && !Array.isArray(record.data)) {
+    const blocks: UiBlock[] = [];
+    for (const [selector, values] of Object.entries(record.data as Record<string, unknown>)) {
+      if (!Array.isArray(values)) continue;
+      const items = values.map((v) => ({ label: text(v) })).filter((i) => i.label).slice(0, 30);
+      if (items.length) blocks.push({ type: 'list', id: `${toolId}-${selector.slice(0, 40)}`, title: selector, items });
+      if (blocks.length >= 4) break;
+    }
+    return blocks.length ? uiBlocksSchema.parse(blocks) : [];
+  }
   const arrayEntry = Object.entries(record).find(([, value]) => Array.isArray(value));
   if (arrayEntry) {
     const rawValues = (arrayEntry[1] as unknown[]).slice(0, 40);
@@ -75,3 +86,48 @@ export function uiBlocksFromToolResult(toolId: string, result: string): UiBlock[
 }
 
 export function validateUiBlocks(value: unknown): UiBlock[] { return uiBlocksSchema.parse(value); }
+
+// ---- Chat-side presentation tool (§45 generative UI) -------------------------------
+// The model cannot stream arbitrary components; it calls present_ui with TYPED params,
+// the server builds blocks through the same zod schema tool results use, and chatService
+// emits them as a real `ui` SSE chunk. Raw JSON pasted into prose stays invisible to the
+// renderer by design — this tool is the ONLY way UI reaches the screen, so a model that
+// wants cards must call it instead of printing JSON text.
+
+/** Gemini function parameters mirror the block schema (flat, per block type). */
+export const presentUiParamsSchema = {
+  type: 'object',
+  properties: {
+    blocks: {
+      type: 'array',
+      description: '1-3 UI blocks to render under the reply',
+      items: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['summary', 'metrics', 'list', 'table'] },
+          title: { type: 'string' },
+          body: { type: 'string', description: 'summary block: the prose body' },
+          metrics: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, value: { type: 'string' }, change: { type: 'string' } }, required: ['label', 'value'] } },
+          items: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, secondary: { type: 'string' }, value: { type: 'string' } }, required: ['label'] } },
+          columns: { type: 'array', items: { type: 'string' } },
+          rows: { type: 'array', items: { type: 'array', items: { type: 'string' } } },
+        },
+        required: ['type'],
+      },
+    },
+  },
+  required: ['blocks'],
+} as const;
+
+/**
+ * Validate + normalize model-supplied present_ui params. Returns null on invalid input
+ * (caller turns that into an error result the model can correct from — never render
+ * unvalidated payloads).
+ */
+export function blocksFromPresentUiInput(input: unknown): UiBlock[] | null {
+  const raw = (input as { blocks?: unknown })?.blocks;
+  if (!Array.isArray(raw) || !raw.length) return null;
+  const withIds = raw.slice(0, 3).map((b, i) => ({ id: `present-${i}-${Date.now() % 100_000}`, ...(b as Record<string, unknown>) }));
+  const parsed = uiBlocksSchema.safeParse(withIds);
+  return parsed.success ? parsed.data : null;
+}

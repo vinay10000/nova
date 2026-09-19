@@ -17,7 +17,15 @@ import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import java.util.concurrent.TimeUnit
 
-@Serializable data class ConversationDto(val id: String, val title: String)
+@Serializable data class ConversationDto(
+  val id: String,
+  val title: String,
+  /** ISO time from the list endpoint; null on a freshly created row. */
+  val updatedAt: String? = null,
+  val archived: Boolean = false,
+)
+
+@Serializable data class PatchConversationRequest(val title: String? = null, val archived: Boolean? = null)
 
 // Mirrors the backend StreamChunk union (see backend/src/ai/AIProvider.ts).
 @Serializable
@@ -98,12 +106,21 @@ interface NovaApi {
 
   @retrofit2.http.GET("/v1/conversations")
   suspend fun conversations(
+    @retrofit2.http.Query("q") q: String? = null,
+    @retrofit2.http.Query("archived") archived: Boolean = false,
     @retrofit2.http.Query("limit") limit: Int = 50,
     @retrofit2.http.Query("offset") offset: Int = 0,
   ): ConversationsResponse
 
   @retrofit2.http.POST("/v1/conversations")
   suspend fun createConversation(): ConversationDto
+
+  // §8 rename / archive. Each field is optional; the backend ignores absent ones.
+  @retrofit2.http.PATCH("/v1/conversations/{id}")
+  suspend fun patchConversation(
+    @retrofit2.http.Path("id") id: String,
+    @retrofit2.http.Body body: PatchConversationRequest,
+  ): OkResponse
 
   @retrofit2.http.GET("/v1/conversations/{id}")
   suspend fun conversation(@retrofit2.http.Path("id") id: String): ConversationDetailDto
@@ -142,7 +159,10 @@ interface NovaApi {
   suspend fun pauseAgent(@retrofit2.http.Path("id") id: String): OkResponse
 
   @retrofit2.http.POST("/v1/agents/{id}/run")
-  suspend fun runAgent(@retrofit2.http.Path("id") id: String): RunAgentResponse
+  suspend fun runAgent(
+    @retrofit2.http.Path("id") id: String,
+    @retrofit2.http.Body body: RunAgentRequest = RunAgentRequest(),
+  ): RunAgentResponse
 
   @retrofit2.http.GET("/v1/executions")
   suspend fun executions(): ExecutionsResponse
@@ -236,7 +256,15 @@ interface NovaApi {
 @Serializable data class LoginRequest(val email: String, val password: String)
 @Serializable data class AuthResponse(val token: String)
 @Serializable data class ConversationsResponse(val conversations: List<ConversationDto>, val total: Int = 0, val hasMore: Boolean = false)
-@Serializable data class MessageDto(val id: String = "", val role: String, val content: String, val attachments: List<AttachmentInfo> = emptyList(), val ui: List<UiBlockDto> = emptyList())
+@Serializable data class MessageDto(
+  val id: String = "",
+  val role: String,
+  val content: String,
+  val attachments: List<AttachmentInfo> = emptyList(),
+  val ui: List<UiBlockDto> = emptyList(),
+  /** ISO timestamp; absent on older rows, in which case the UI shows no clock. */
+  val createdAt: String? = null,
+)
 @Serializable data class AttachmentInfo(val id: String, val filename: String, val mime: String, val size: Long = 0)
 @Serializable data class ConversationDetailDto(
   val id: String,
@@ -282,6 +310,7 @@ interface NovaApi {
   val status: String = "draft",
 )
 @Serializable data class AgentsResponse(val agents: List<AgentDto> = emptyList())
+@Serializable data class RunAgentRequest(val background: Boolean = false)
 @Serializable data class RunAgentResponse(val executionId: String, val status: String, val output: String? = null)
 @Serializable data class StepDto(val id: String = "", val label: String)
 @Serializable data class ExecutionDto(

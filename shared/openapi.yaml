@@ -94,7 +94,7 @@ paths:
     post: { summary: Pause agent, responses: { '200': { description: ok } } }
   /v1/agents/{id}/run:
     post:
-      summary: Run Now (§33) — inline execution, bounded; returns {executionId, status, output?}
+      summary: Run Now (§33) — inline by default; body {background:true} detaches the run (QUEUED, 10-min budget, poll /v1/executions/{id}, cancel via /cancel)
       responses: { '200': { description: ok }, '404': { description: not_found } }
   /v1/tools:
     get: { summary: Tool registry for the visual editor (§13), responses: { '200': { description: ok } } }

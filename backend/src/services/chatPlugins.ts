@@ -155,7 +155,7 @@ export const chatPlugins: ChatPlugin[] = [
     id: 'browser',
     name: 'Browser',
     blurb: 'Research a public web page and summarize live content',
-    toolIds: ['browser_open'],
+    toolIds: ['browser_open', 'browser_scrape'],
     requires: null,
     systemInstruction:
       'The user wants live information from a public web page. Use browser_open when a complete HTTPS URL is available. ' +

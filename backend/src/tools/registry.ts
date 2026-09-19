@@ -778,13 +778,64 @@ const browserOpen: Tool = {
   },
 };
 
+const browserScrape: Tool = {
+  id: 'browser_scrape', description: 'Extract text of CSS-selector-matched elements from a rendered https page (Browserless /scrape; SSRF-guarded)', scope: 'browser.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { url: { type: 'string' }, selectors: { type: 'array', items: { type: 'string' } } }, required: ['url', 'selectors'] },
+  execute: async (input) => {
+    const { scrape } = await import('../browser/BrowserProvider.js');
+    const { url, selectors } = (input ?? {}) as Record<string, unknown>;
+    if (typeof url !== 'string' || !url.trim()) throw new Error('invalid_input: url is required');
+    if (!Array.isArray(selectors)) throw new Error('invalid_input: selectors array is required');
+    return scrape(url.trim(), selectors.map(String));
+  },
+};
+
+const browserScreenshot: Tool = {
+  id: 'browser_screenshot', description: 'Capture a PNG screenshot of a rendered https page (Browserless; returns base64)', scope: 'browser.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+  execute: async (input) => {
+    const { screenshot } = await import('../browser/BrowserProvider.js');
+    const { url } = (input ?? {}) as Record<string, unknown>;
+    if (typeof url !== 'string' || !url.trim()) throw new Error('invalid_input: url is required');
+    return screenshot(url.trim());
+  },
+};
+
+const browserPdf: Tool = {
+  id: 'browser_pdf', description: 'Render an https page to PDF (Browserless; returns base64)', scope: 'browser.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+  execute: async (input) => {
+    const { pagePdf } = await import('../browser/BrowserProvider.js');
+    const { url } = (input ?? {}) as Record<string, unknown>;
+    if (typeof url !== 'string' || !url.trim()) throw new Error('invalid_input: url is required');
+    return pagePdf(url.trim());
+  },
+};
+
+// F6: one-shot research pipeline — Browserless fetch over 1-5 pages, optional E2B
+// sandbox transform script. The script path runs model-written code, so this tool is
+// approval-gated the same way workspace_run_command is.
+const browserTask: Tool = {
+  id: 'browser_task', description: 'Fetch 1-5 https pages as text and optionally transform them with a Python script in a disposable cloud sandbox (E2B; approval required)', scope: 'browser.read', isWrite: true, approval: 'always',
+  inputSchema: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } }, instruction: { type: 'string' }, script: { type: 'string' } }, required: ['urls', 'instruction'] },
+  execute: async (input) => {
+    const { runBrowserTask } = await import('../browser/BrowserProvider.js');
+    const { urls, instruction, script } = (input ?? {}) as Record<string, unknown>;
+    if (!Array.isArray(urls)) throw new Error('invalid_input: urls array is required');
+    if (typeof instruction !== 'string' || !instruction.trim()) throw new Error('invalid_input: instruction is required');
+    return runBrowserTask({ urls: urls.map(String), instruction: instruction.trim(), ...(typeof script === 'string' && script.trim() ? { script } : {}) });
+  },
+};
+
 // ---- F3: Agent Mode cloud workspace (E2B free tier) --------------------------
 const workspaceCreate: Tool = {
   id: 'workspace_create', description: 'Create a cloud code sandbox, returns sandboxId (F3)', scope: 'workspace.create', isWrite: false, approval: 'never',
   inputSchema: { type: 'object', properties: {} },
-  execute: async () => {
-    const { defaultSandbox } = await import('../sandbox/CodeSandboxProvider.js');
-    return defaultSandbox().create();
+  execute: async (_input, ctx) => {
+    const { defaultSandbox, registerSandbox } = await import('../sandbox/CodeSandboxProvider.js');
+    const created = await defaultSandbox().create();
+    registerSandbox(ctx.agentId, created.sandboxId);
+    return created;
   },
 };
 
@@ -821,11 +872,22 @@ const workspaceReadFile: Tool = {
 const workspaceDestroy: Tool = {
   id: 'workspace_destroy', description: 'Destroy a cloud sandbox (F3)', scope: 'workspace.create', isWrite: false, approval: 'never',
   inputSchema: { type: 'object', properties: { sandboxId: { type: 'string' } }, required: ['sandboxId'] },
-  execute: async (input) => {
-    const { defaultSandbox } = await import('../sandbox/CodeSandboxProvider.js');
+  execute: async (input, ctx) => {
+    const { defaultSandbox, unregisterSandbox } = await import('../sandbox/CodeSandboxProvider.js');
     const { sandboxId } = (input ?? {}) as Record<string, unknown>;
     await defaultSandbox().destroy(String(sandboxId ?? ''));
+    unregisterSandbox(ctx.agentId, String(sandboxId ?? ''));
     return { destroyed: true };
+  },
+};
+
+const workspaceListFiles: Tool = {
+  id: 'workspace_list_files', description: 'List files in the cloud sandbox (F3)', scope: 'workspace.read', isWrite: false, approval: 'never',
+  inputSchema: { type: 'object', properties: { sandboxId: { type: 'string' }, path: { type: 'string' } }, required: ['sandboxId'] },
+  execute: async (input) => {
+    const { defaultSandbox } = await import('../sandbox/CodeSandboxProvider.js');
+    const { sandboxId, path } = (input ?? {}) as Record<string, unknown>;
+    return defaultSandbox().listFiles(String(sandboxId ?? ''), typeof path === 'string' ? path : undefined);
   },
 };
 
@@ -842,8 +904,8 @@ export const toolRegistry = new Map<string, Tool>(
     driveList, driveDocsGet, driveDocsCreate, driveSheetsRead, driveSheetsAppend,
     vercelListProjects, vercelListDeployments, vercelTriggerDeploy,
     supabaseListTables, supabaseQueryRows, supabaseInsertRow,
-    browserOpen,
-    workspaceCreate, workspaceWriteFile, workspaceRunCommand, workspaceReadFile, workspaceDestroy,
+    browserOpen, browserScrape, browserScreenshot, browserPdf, browserTask,
+    workspaceCreate, workspaceWriteFile, workspaceRunCommand, workspaceReadFile, workspaceListFiles, workspaceDestroy,
   ].map((t) => [t.id, t]),
 );
 

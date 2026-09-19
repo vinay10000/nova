@@ -2,7 +2,15 @@ import type { AIProvider, ChatMessage, InlinePart, StreamChunk } from '../ai/AIP
 import type { PrismaClient } from '@prisma/client';
 import { detectPlugin, pluginToolDefs, executePluginTool, MAX_PLUGIN_STEPS, connectedProviders, isPluginUsable, type ChatPlugin } from './chatPlugins.js';
 import { MODELS } from '../ai/models.js';
-import { uiBlocksFromToolResult, type UiBlock } from '../ui/UiBlocks.js';
+import { uiBlocksFromToolResult, blocksFromPresentUiInput, presentUiParamsSchema, type UiBlock } from '../ui/UiBlocks.js';
+
+/** §45 generative UI: the model calls this instead of printing UI JSON in prose. */
+const PRESENT_UI_DEF = {
+  name: 'present_ui',
+  description:
+    'Render rich UI cards (summary, metrics, list, table) under your reply. Call this when the user asks for visual/generative UI, dashboards, comparisons or structured overviews. NEVER print UI JSON in your text answer — call this tool instead.',
+  parameters: presentUiParamsSchema,
+};
 
 export interface ChatStore {
   loadMessages(conversationId: string, userId: string): Promise<{ role: string; content: string }[]>;
@@ -98,9 +106,14 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
         { role: 'user' as const, content: userQuery },
       ];
 
-      // If a plugin is active, add system instruction and tools
+      // If a plugin is active, add system instruction and tools. present_ui rides on
+      // every chat (plugin or not) so "show me a dashboard" never degrades to prose JSON.
       const pluginTools = activePlugin ? pluginToolDefs(activePlugin) : undefined;
-      const systemMessage = activePlugin ? activePlugin.systemInstruction : undefined;
+      const chatToolDefs = [...(pluginTools ?? []), PRESENT_UI_DEF];
+      const UI_HINT =
+        'The app renders tool results and present_ui calls as rich UI cards automatically. ' +
+        'Answer in plain prose. NEVER print raw JSON or a code block describing a UI — call present_ui instead.';
+      const systemMessage = activePlugin ? `${activePlugin.systemInstruction} ${UI_HINT}` : UI_HINT;
 
       let full = '';
       let uiBlocks: UiBlock[] = [];
@@ -122,6 +135,11 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
       while (toolSteps <= MAX_PLUGIN_STEPS) {
         if (signal?.aborted) break;
 
+        // The function_result path chains on previous_interaction_id; an extra
+        // OpenAI-style tool transcript in `input` would double-feed the model.
+        // Follow-up guidance lives in the system instruction instead.
+        const loopMessages = pendingResults?.length ? messages : currentMessages;
+
         const streamOpts: Record<string, unknown> = {
           model: resolvedModel,
           signal,
@@ -129,7 +147,7 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
           extractedText,
         };
         if (previousInteractionId) streamOpts.previousInteractionId = previousInteractionId;
-        if (pluginTools?.length) streamOpts.tools = pluginTools;
+        streamOpts.tools = chatToolDefs;
         if (pendingResults?.length) streamOpts.functionResults = pendingResults;
 
         pendingResults = undefined;
@@ -137,7 +155,7 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
         const toolCalls: { toolId: string; callId: string; args: unknown }[] = [];
         let completionChunk: StreamChunk | undefined;
 
-        for await (const chunk of ai.streamChat(currentMessages, streamOpts as Parameters<AIProvider['streamChat']>[1])) {
+        for await (const chunk of ai.streamChat(loopMessages, streamOpts as Parameters<AIProvider['streamChat']>[1])) {
           if (signal?.aborted) break;
 
           if (chunk.type === 'token') {
@@ -170,10 +188,26 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
           break;
         }
 
-        // Execute tool calls and prepare results for the next turn
-        if (db) {
+        // Execute tool calls and prepare results for the next turn.
+        // present_ui is local (no DB needed) — validate + emit blocks immediately.
+        {
           const results: { type: 'function_result'; name: string; call_id: string; result: string; is_error?: boolean }[] = [];
           for (const tc of toolCalls) {
+            if (tc.toolId === 'present_ui') {
+              const blocks = blocksFromPresentUiInput(tc.args);
+              if (blocks?.length) {
+                uiBlocks = [...uiBlocks, ...blocks].slice(0, 8);
+                yield { type: 'ui', blocks };
+                results.push({ type: 'function_result', name: tc.toolId, call_id: tc.callId, result: JSON.stringify({ rendered: blocks.length }) });
+              } else {
+                results.push({ type: 'function_result', name: tc.toolId, call_id: tc.callId, result: 'invalid blocks — check the schema and retry with valid types', is_error: true });
+              }
+              continue;
+            }
+            if (!db) {
+              results.push({ type: 'function_result', name: tc.toolId, call_id: tc.callId, result: 'tool unavailable', is_error: true });
+              continue;
+            }
             const { result, isError, reconnect, retryable } = await executePluginTool(db, userId, tc.toolId, tc.args);
             if (!isError) {
               const blocks = uiBlocksFromToolResult(tc.toolId, result);

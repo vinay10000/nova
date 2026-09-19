@@ -90,6 +90,10 @@ export async function runAgentLoop(opts: {
   signal?: AbortSignal;
   /** Model override — the service retries here on quota exhaustion. */
   model?: string;
+  /** Wall-clock budget override — background runs get minutes, not the Vercel 55s. */
+  budgetMs?: number;
+  /** §33/§61: background runs poll the Execution row so a user Cancel actually stops the loop. */
+  isCancelled?: () => Promise<boolean>;
   onStep?: (step: RuntimeStep) => Promise<void> | void;
 }): Promise<RuntimeResult> {
   const { ai, db, agent } = opts;
@@ -102,9 +106,15 @@ export async function runAgentLoop(opts: {
   const defs = toToolDefs(tools);
 
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), RUN_BUDGET_MS);
+  const timer = setTimeout(() => ac.abort(), opts.budgetMs ?? RUN_BUDGET_MS);
   const aborted = () => ac.signal.aborted || opts.signal?.aborted;
   opts.signal?.addEventListener('abort', () => ac.abort());
+  // Cancel polling for long runs: the /cancel route flips the Execution row, the loop
+  // picks it up between turns. Inline runs skip this (RUN_BUDGET_MS bounds them).
+  const cancelTimer = opts.isCancelled
+    ? setInterval(() => { void opts.isCancelled!().then((c) => { if (c) ac.abort(); }).catch(() => {}); }, 5000)
+    : null;
+  if (cancelTimer) cancelTimer.unref?.();
   await step({ label: 'Agent started' });
 
   try {
@@ -185,5 +195,6 @@ export async function runAgentLoop(opts: {
     return { output: output.trim(), interactionId: previousInteractionId, steps };
   } finally {
     clearTimeout(timer);
+    if (cancelTimer) clearInterval(cancelTimer);
   }
 }

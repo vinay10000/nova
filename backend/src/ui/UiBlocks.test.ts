@@ -16,4 +16,30 @@ assert.equal(list[0]?.type, 'summary');
 assert.deepEqual(uiBlocksFromToolResult('github_create_issue', JSON.stringify({ id: 1 })), []);
 assert.throws(() => validateUiBlocks([{ type: 'chart', id: 'bad' }]), /discriminator/);
 assert.throws(() => validateUiBlocks([{ type: 'summary', id: 'x', body: 'x'.repeat(2_001) }]), /too_big/);
+
+// present_ui: model params → validated blocks; garbage rejected, never rendered.
+{
+  const { blocksFromPresentUiInput } = await import('./UiBlocks.js');
+  const ok = blocksFromPresentUiInput({ blocks: [
+    { type: 'metrics', title: 'Stats', metrics: [{ label: 'solved', value: '42' }] },
+    { type: 'list', items: [{ label: 'a' }, { label: 'b' }] },
+  ] });
+  assert.equal(ok?.length, 2);
+  assert.equal(ok?.[0]?.type, 'metrics');
+  assert.ok(ok?.[0]?.id, 'server assigns ids');
+  assert.equal(blocksFromPresentUiInput({ blocks: [{ type: 'chart' }] }), null, 'unknown type rejected');
+  assert.equal(blocksFromPresentUiInput({ blocks: [] }), null);
+  assert.equal(blocksFromPresentUiInput({}), null);
+  assert.equal(blocksFromPresentUiInput(null), null);
+  const overCap = blocksFromPresentUiInput({ blocks: Array.from({ length: 5 }, () => ({ type: 'summary', body: 'x' })) });
+  assert.ok(overCap && overCap.length <= 3, 'capped at 3 blocks');
+}
+
+// browser_scrape presentation: selector map → list blocks.
+{
+  const blocks = uiBlocksFromToolResult('browser_scrape', JSON.stringify({ url: 'https://example.com', data: { h1: ['Title'], '.price': ['$10', '$20'] } }));
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0]?.type, 'list');
+  assert.deepEqual(uiBlocksFromToolResult('browser_scrape', JSON.stringify({ data: {} })), []);
+}
 console.log('generative UI checks passed');

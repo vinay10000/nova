@@ -8,7 +8,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { GoogleGenAI } from '@google/genai';
 import { GeminiProvider, MODELS } from './ai/GeminiProvider.js';
 import { createChatService, ConversationNotFoundError } from './services/chatService.js';
-import { executeAgent, scopesForTools } from './services/agentService.js';
+import { executeAgent, runAgentInBackground, scopesForTools } from './services/agentService.js';
 import { toolRegistry } from './tools/registry.js';
 import { prismaChatStore } from './services/prismaChatStore.js';
 import { prismaAttachmentSource } from './services/prismaAttachmentSource.js';
@@ -240,6 +240,7 @@ app.get('/v1/conversations/:id', async (req, reply) => {
       id: m.id,
       role: m.role,
       content: m.content,
+      createdAt: m.createdAt.toISOString(), // §8: clients render real message times
       attachments: m.attachments,
       ui: (m.metadata && typeof m.metadata === 'object' && !Array.isArray(m.metadata) && 'ui' in m.metadata)
         ? (m.metadata as { ui?: unknown }).ui ?? []
@@ -555,12 +556,17 @@ app.get('/v1/agents', async (req, reply) => {
   return { agents: await db.agent.findMany({ where: { userId }, orderBy: { updatedAt: 'desc' } }) };
 });
 
-// §33 Run Now — executes inline, bounded by RUN_BUDGET_MS (queue + worker land in Phase 5).
+// §33 Run Now — inline by default (bounded by RUN_BUDGET_MS); {background:true} detaches
+// the run server-side (10-minute budget, cancel via /v1/executions/:id/cancel).
 app.post('/v1/agents/:id/run', async (req, reply) => {
   const userId = await requireUser(req, reply);
   if (!userId) return reply;
   const { id } = req.params as { id: string };
+  const body = z.object({ background: z.boolean().optional() }).safeParse(req.body ?? {});
   try {
+    if (body.success && body.data.background) {
+      return await runAgentInBackground(db, ai, { userId, agentId: id, trigger: 'manual' });
+    }
     return await executeAgent(db, ai, { userId, agentId: id, trigger: 'manual' });
   } catch (err) {
     if (err instanceof Error && err.message === 'not_found') return reply.code(404).send({ error: 'not_found' });
