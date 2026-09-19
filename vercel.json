@@ -3,10 +3,10 @@
   "installCommand": "npm install --prefix backend",
   "buildCommand": "npm run build --prefix backend",
   "functions": {
-    "backend/api/index.js": {
+    "api/index.js": {
       "maxDuration": 60,
-      "includeFiles": "backend/node_modules/.prisma/**"
+      "includeFiles": "backend/dist/**"
     }
   },
-  "rewrites": [{ "source": "/(.*)", "destination": "/backend/api/index.js" }]
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index.js" }]
 }
