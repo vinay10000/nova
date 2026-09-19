@@ -32,3 +32,4 @@ check-sdk-req.mjs
 emu-tmp/
 .gradle-home/
 .gradle/
+.vercel
