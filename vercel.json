@@ -2,11 +2,5 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "installCommand": "npm install --prefix backend",
   "buildCommand": "npm run build --prefix backend",
-  "functions": {
-    "api/index.js": {
-      "maxDuration": 60,
-      "includeFiles": "backend/dist/**"
-    }
-  },
-  "rewrites": [{ "source": "/(.*)", "destination": "/api/index.js" }]
+  "rewrites": [{ "source": "/(.*)", "destination": "/backend/dist/index.js" }]
 }
