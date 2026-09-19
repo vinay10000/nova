@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "node",
   "installCommand": "npm install --prefix backend",
   "buildCommand": "npm run build --prefix backend",
   "rewrites": [{ "source": "/(.*)", "destination": "/backend/dist/index.js" }]
