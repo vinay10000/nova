@@ -100,17 +100,17 @@ export const presentUiParamsSchema = {
   properties: {
     blocks: {
       type: 'array',
-      description: '1-3 UI blocks to render under the reply',
+      description: '1-3 UI blocks to render under the reply — one card per coherent unit of structured data',
       items: {
         type: 'object',
         properties: {
           type: { type: 'string', enum: ['summary', 'metrics', 'list', 'table'] },
-          title: { type: 'string' },
-          body: { type: 'string', description: 'summary block: the prose body' },
-          metrics: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, value: { type: 'string' }, change: { type: 'string' } }, required: ['label', 'value'] } },
-          items: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, secondary: { type: 'string' }, value: { type: 'string' } }, required: ['label'] } },
-          columns: { type: 'array', items: { type: 'string' } },
-          rows: { type: 'array', items: { type: 'array', items: { type: 'string' } } },
+          title: { type: 'string', description: 'Short noun phrase, sentence case, about 6 words (e.g. "Sprint overview")' },
+          body: { type: 'string', description: 'summary block: concise factual prose under 600 characters; never apologies or refusals' },
+          metrics: { type: 'array', items: { type: 'object', properties: { label: { type: 'string', description: 'Short metric name' }, value: { type: 'string', description: 'Display value with unit' }, change: { type: 'string', description: 'Signed delta such as +12% or -3' } }, required: ['label', 'value'] } },
+          items: { type: 'array', items: { type: 'object', properties: { label: { type: 'string', description: 'Primary line' }, secondary: { type: 'string', description: 'Supporting line' }, value: { type: 'string', description: 'Right-aligned datum' } }, required: ['label'] } },
+          columns: { type: 'array', items: { type: 'string' }, description: 'Table column headers, left to right' },
+          rows: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'One array per row, same order as columns' },
         },
         required: ['type'],
       },

@@ -8,7 +8,11 @@ import { uiBlocksFromToolResult, blocksFromPresentUiInput, presentUiParamsSchema
 const PRESENT_UI_DEF = {
   name: 'present_ui',
   description:
-    'Render rich UI cards (summary, metrics, list, table) under your reply. Call this when the user asks for visual/generative UI, dashboards, comparisons or structured overviews. NEVER print UI JSON in your text answer — call this tool instead.',
+    'Render rich UI cards (summary, metrics, list, table) under your reply. ' +
+    'Use it ONLY for structured content: lists, comparisons, tabular data, numeric metrics, or a short factual summary with key/value facts. ' +
+    'Do NOT put refusals, apologies, limitations or conversational filler in a card — those stay in plain prose. ' +
+    'Titles are short noun phrases (about 6 words, sentence case). ' +
+    'NEVER print UI JSON in your text answer — call this tool instead.',
   parameters: presentUiParamsSchema,
 };
 
@@ -112,7 +116,9 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
       const chatToolDefs = [...(pluginTools ?? []), PRESENT_UI_DEF];
       const UI_HINT =
         'The app renders tool results and present_ui calls as rich UI cards automatically. ' +
-        'Answer in plain prose. NEVER print raw JSON or a code block describing a UI — call present_ui instead.';
+        'Answer in plain prose. NEVER print raw JSON or a code block describing a UI — call present_ui instead. ' +
+        'Cards are for structured facts: metrics for numbers, list for items, table for rows, summary for a short ' +
+        'factual overview with key/value metadata (under 600 characters). Refusals, apologies and limitations stay in prose.';
       const systemMessage = activePlugin ? `${activePlugin.systemInstruction} ${UI_HINT}` : UI_HINT;
 
       let full = '';

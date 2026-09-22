@@ -13,7 +13,6 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -26,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Attachment
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ContentCopy
@@ -40,7 +40,12 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.ThumbDown
+import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.MailOutline
@@ -70,7 +75,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -142,8 +149,6 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
 
   val scheme = MaterialTheme.colorScheme
   val focus = LocalFocusManager.current
-  var appeared by remember { mutableStateOf(false) }
-  LaunchedEffect(Unit) { appeared = true }
 
   // Maps a backend failure to a sentence. A 401 means the credentials are
   // wrong; no exception code means the request never left the phone.
@@ -174,45 +179,43 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
 
   // Edge-to-edge means the form must dodge the status bar, and a scrolling
   // column means the keyboard cannot push the sign-in button off screen.
+  // No opaque background — the ambient field shows through; the form is glass.
   Column(
     Modifier
       .fillMaxSize()
-      .background(scheme.surface)
       .safeDrawingPadding()
       .imePadding()
       .verticalScroll(rememberScrollState())
       .padding(horizontal = NovaSpace.xxl, vertical = NovaSpace.xl),
   ) {
     Spacer(Modifier.height(NovaSpace.xxl))
-    AnimatedVisibility(
-      visible = appeared,
-      enter = fadeIn(tween(NovaMotion.Slow)) + slideInVertically(tween(NovaMotion.Slow)) { it / 6 },
-    ) {
-      Column {
-        Text(
-          "Nova",
-          fontFamily = NovaDisplay,
-          style = MaterialTheme.typography.displayMedium,
-          color = scheme.primary,
-        )
-        Spacer(Modifier.height(NovaSpace.sm))
-        Text(
-          if (registering) "Create your account." else "Welcome back.",
-          fontFamily = NovaDisplay,
-          style = MaterialTheme.typography.headlineSmall,
-          color = scheme.onSurface,
-        )
-        Spacer(Modifier.height(NovaSpace.xs))
-        Text(
-          if (registering) "One account holds your chats, agents and connections." else "Pick up where you left off.",
-          style = MaterialTheme.typography.bodyMedium,
-          color = scheme.onSurfaceVariant,
-        )
-      }
+    // Visible by default — never gate the headline behind an entrance reveal.
+    Column {
+      Text(
+        "Nova",
+        fontFamily = NovaDisplay,
+        style = MaterialTheme.typography.displayMedium,
+        color = scheme.primary,
+      )
+      Spacer(Modifier.height(NovaSpace.sm))
+      Text(
+        if (registering) "Create your account." else "Welcome back.",
+        fontFamily = NovaDisplay,
+        style = MaterialTheme.typography.headlineSmall,
+        color = scheme.onSurface,
+      )
+      Spacer(Modifier.height(NovaSpace.xs))
+      Text(
+        if (registering) "One account holds your chats, agents and connections." else "Pick up where you left off.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = scheme.onSurfaceVariant,
+      )
     }
 
     Spacer(Modifier.height(NovaSpace.xxl))
 
+    GlassPanel(Modifier.fillMaxWidth(), corner = RoundedCornerShape(NovaRadius.xl)) {
+      Column(Modifier.padding(NovaSpace.xl)) {
     OutlinedTextField(
       email, { email = it },
       label = { Text("Email") },
@@ -269,6 +272,8 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
     Spacer(Modifier.height(16.dp))
     TextButton(onClick = { registering = !registering; error = null }) {
       Text(if (registering) "Already have an account? Sign in" else "New to Nova? Create an account", color = scheme.onSurfaceVariant)
+    }
+      }
     }
   }
 }
@@ -512,11 +517,11 @@ class ChatViewModel(
 }
 
 // Highlight @plugin mentions in sent user bubbles — bubble background is
-// colorScheme.primary, so paint mentions in the surface color for contrast.
+// primaryContainer, so paint mentions a step darker for contrast.
 @Composable
 fun highlightPluginMentions(text: String): AnnotatedString {
   val scheme = MaterialTheme.colorScheme
-  return highlightPluginMentions(text, scheme.surface)
+  return highlightPluginMentions(text, scheme.primary)
 }
 
 // Non-composable variant for VisualTransformation (typing-time highlight in the input).
@@ -535,7 +540,9 @@ fun highlightPluginMentions(text: String, accent: Color): AnnotatedString {
 // §6 Markdown rendering; highlighted code fences with copy button (§6 "copy code").
 @Composable
 fun MarkdownBody(content: String, streaming: Boolean) {
-  val dark = isSystemInDarkTheme()
+  // §39: read the resolved theme, not the system one — a pinned dark app on a
+  // light phone must still get dark code fences (and vice versa).
+  val dark = novaDark()
   val highlights = remember(dark) { dev.snipme.highlights.Highlights.Builder().theme(dev.snipme.highlights.model.SyntaxThemes.atom(darkMode = dark)) }
   Markdown(
     content = content,
@@ -552,87 +559,15 @@ fun MarkdownBody(content: String, streaming: Boolean) {
     ),
     colors = markdownColor(
       text = MaterialTheme.colorScheme.onSurface,
-      codeBackground = MaterialTheme.colorScheme.surfaceContainerHigh,
+      codeBackground = novaGlassFill(),
     ),
     typography = markdownTypography(),
     modifier = Modifier.padding(vertical = 2.dp),
   )
 }
 
-@Composable
-fun GenerativeUiRenderer(
-  blocks: List<UiBlockDto>,
-  clipboard: androidx.compose.ui.platform.ClipboardManager,
-  onOpen: (String) -> Unit = {},
-) {
-  Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-    blocks.forEach { block ->
-      when (block.type) {
-        "summary" -> UiSummaryCard(block, clipboard, onOpen)
-        "metrics" -> UiMetricsCard(block, clipboard, onOpen)
-        "list" -> UiListCard(block, clipboard, onOpen)
-        "table" -> UiTableCard(block, clipboard, onOpen)
-      }
-    }
-  }
-}
-
-@Composable
-private fun UiCard(block: UiBlockDto, clipboard: androidx.compose.ui.platform.ClipboardManager, onOpen: (String) -> Unit, content: @Composable ColumnScope.() -> Unit) {
-  var expanded by remember(block.id) { mutableStateOf(false) }
-  Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh), modifier = Modifier.fillMaxWidth()) {
-    Column(Modifier.padding(14.dp)) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(block.title ?: "Live data", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-        block.actions.forEach { action ->
-          TextButton(onClick = {
-            when (action.type) {
-              "copy" -> clipboard.setText(AnnotatedString(action.value ?: block.body ?: block.title.orEmpty()))
-              "open" -> action.value?.let(onOpen)
-              "expand", "filter" -> expanded = !expanded
-            }
-          }, modifier = Modifier.height(36.dp)) { Text(action.label, style = MaterialTheme.typography.labelSmall) }
-        }
-      }
-      if (expanded || block.actions.none { it.type == "expand" }) content()
-    }
-  }
-}
-
-@Composable private fun UiSummaryCard(block: UiBlockDto, clipboard: androidx.compose.ui.platform.ClipboardManager, onOpen: (String) -> Unit) = UiCard(block, clipboard, onOpen) {
-  Text(block.body.orEmpty(), style = MaterialTheme.typography.bodyMedium)
-  block.metadata.forEach { item ->
-    Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-      Text(item.label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-      Text(item.value ?: item.secondary.orEmpty(), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 12.dp))
-    }
-  }
-}
-@Composable private fun UiMetricsCard(block: UiBlockDto, clipboard: androidx.compose.ui.platform.ClipboardManager, onOpen: (String) -> Unit) = UiCard(block, clipboard, onOpen) {
-  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-    block.metrics.forEach { metric ->
-      Column(Modifier.widthIn(min = 92.dp).semantics { contentDescription = "${metric.label}: ${metric.value}" }) {
-        Text(metric.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(metric.value, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        metric.change?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
-      }
-    }
-  }
-}
-@Composable private fun UiListCard(block: UiBlockDto, clipboard: androidx.compose.ui.platform.ClipboardManager, onOpen: (String) -> Unit) = UiCard(block, clipboard, onOpen) {
-  block.items.forEach { item ->
-    Column(Modifier.fillMaxWidth().padding(vertical = 5.dp).semantics { contentDescription = item.label }) {
-      Text(item.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-      item.secondary?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-    }
-  }
-}
-@Composable private fun UiTableCard(block: UiBlockDto, clipboard: androidx.compose.ui.platform.ClipboardManager, onOpen: (String) -> Unit) = UiCard(block, clipboard, onOpen) {
-  Column(Modifier.horizontalScroll(rememberScrollState())) {
-    Row { block.columns.forEach { Text(it, Modifier.width(120.dp).padding(4.dp), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold) } }
-    block.rows.forEach { row -> Row { row.take(block.columns.size).forEach { Text(it, Modifier.width(120.dp).padding(4.dp), style = MaterialTheme.typography.bodySmall) } } }
-  }
-}
+// §45 generative UI lives in GenerativeUi.kt — typed cards (summary, metrics,
+// list, table) with explicit theme-token contrast for dark and light panels.
 
 @Composable
 private fun BareAction(
@@ -643,6 +578,101 @@ private fun BareAction(
   // 48dp minimum — the icon stays small, the tap target does not.
   IconButton(onClick = onClick, modifier = Modifier.size(MinTouchTarget)) {
     Icon(icon, contentDescription = description, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+  }
+}
+
+/** Drawer menu row: h52, 24dp tertiary icon, 16sp label. */
+@Composable
+private fun DrawerMenuRow(
+  icon: androidx.compose.ui.graphics.vector.ImageVector,
+  label: String,
+  onClick: () -> Unit,
+) {
+  val scheme = MaterialTheme.colorScheme
+  Row(
+    Modifier
+      .fillMaxWidth()
+      .heightIn(min = 52.dp)
+      .clip(RoundedCornerShape(NovaRadius.md))
+      .clickable { onClick() }
+      .padding(horizontal = 4.dp, vertical = 12.dp)
+      .semantics { role = Role.Button; contentDescription = label },
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Icon(icon, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+    Spacer(Modifier.width(12.dp))
+    Text(label, fontSize = 16.sp, color = scheme.onSurface)
+  }
+}
+
+/**
+ * Action icon row: copy, thumbs-up, thumbs-down, speaker, share, more —
+ * 24dp glyphs under every completed assistant message. Like/dislike are
+ * local toggles (no backend signal); more reveals refresh.
+ */
+@Composable
+private fun AssistantActionRow(
+  onCopy: () -> Unit,
+  onSpeak: () -> Unit,
+  onShare: () -> Unit,
+  onRegenerate: () -> Unit,
+  showRegenerate: Boolean,
+) {
+  val scheme = MaterialTheme.colorScheme
+  var liked by remember { mutableStateOf(false) }
+  var disliked by remember { mutableStateOf(false) }
+  var menu by remember { mutableStateOf(false) }
+  Row(
+    Modifier.offset(x = (-12).dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    IconButton(onClick = onCopy, modifier = Modifier.size(MinTouchTarget)) {
+      Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = scheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+    }
+    IconButton(
+      onClick = { liked = !liked; if (liked) disliked = false },
+      modifier = Modifier.size(MinTouchTarget),
+    ) {
+      Icon(
+        Icons.Default.ThumbUp,
+        contentDescription = "Good response",
+        tint = if (liked) scheme.primary else scheme.onSurfaceVariant,
+        modifier = Modifier.size(24.dp),
+      )
+    }
+    IconButton(
+      onClick = { disliked = !disliked; if (disliked) liked = false },
+      modifier = Modifier.size(MinTouchTarget),
+    ) {
+      Icon(
+        Icons.Default.ThumbDown,
+        contentDescription = "Bad response",
+        tint = if (disliked) scheme.primary else scheme.onSurfaceVariant,
+        modifier = Modifier.size(24.dp),
+      )
+    }
+    IconButton(onClick = onSpeak, modifier = Modifier.size(MinTouchTarget)) {
+      Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Read aloud", tint = scheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+    }
+    IconButton(onClick = onShare, modifier = Modifier.size(MinTouchTarget)) {
+      Icon(Icons.Default.Share, contentDescription = "Share", tint = scheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+    }
+    Box {
+      IconButton(onClick = { menu = true }, modifier = Modifier.size(MinTouchTarget)) {
+        Icon(Icons.Default.MoreVert, contentDescription = "More actions", tint = scheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+      }
+      DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = novaGlassFill()) {
+        if (showRegenerate) {
+          DropdownMenuItem(
+            text = { Text("Regenerate") },
+            leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(20.dp)) },
+            onClick = { menu = false; onRegenerate() },
+          )
+        } else {
+          DropdownMenuItem(text = { Text("No further actions") }, onClick = { menu = false })
+        }
+      }
+    }
   }
 }
 
@@ -672,6 +702,7 @@ private fun TypingIndicator(modifier: Modifier = Modifier) {
 }
 
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit = {}, onConnectionsClick: () -> Unit = {}, onAgentsClick: () -> Unit = {}, onActivityClick: () -> Unit = {}, onAllChatsClick: () -> Unit = {}, vm: ChatViewModel = viewModel()) {
   LaunchedEffect(session) { vm.configureSession(session) }
@@ -839,6 +870,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   drawerDelete?.let { target ->
     AlertDialog(
       onDismissRequest = { drawerDelete = null },
+      containerColor = novaGlassFill(),
       title = { Text("Delete chat?", fontFamily = NovaDisplay) },
       text = {
         Text(
@@ -867,47 +899,37 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   ModalNavigationDrawer(
     drawerState = drawerState,
     drawerContent = {
+      // Fill-only glass: drawers are a separate window layer — no fake blur.
       ModalDrawerSheet(
-        drawerContainerColor = if (novaDark()) NovaPalette.GlassScrimDark else scheme.surface,
-        drawerContentColor = scheme.onSurface,
-        modifier = Modifier.width(320.dp),
+        drawerContainerColor = novaGlassFill(),
+        drawerContentColor = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.width(310.dp),
       ) {
-        Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+        // Header: Nova 24 bold + search circle, then menu rows.
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
           Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-              Text("Library", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineSmall, color = scheme.onSurface)
-              Text("Your recent conversations", style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
-            }
-            NovaIconAction(Icons.Default.Close, "Close library") { scope.launch { drawerState.close() } }
+            Text(
+              "Nova",
+              modifier = Modifier.weight(1f),
+              fontSize = 24.sp,
+              fontWeight = FontWeight.Bold,
+              color = scheme.onSurface,
+            )
+            SpecCircleButton(
+              Icons.Default.Search,
+              "Search chats",
+              onClick = { scope.launch { drawerState.close() }; onAllChatsClick() },
+              onBlack = false,
+            )
           }
-          Spacer(Modifier.height(16.dp))
-          FilledTonalButton(
-            onClick = {
-              createFreshChat()
-              scope.launch { drawerState.close() }
-            },
-            enabled = !creatingChat,
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-            shape = RoundedCornerShape(16.dp),
-          ) {
-            if (creatingChat) {
-              CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = scheme.primary)
-            } else {
-              Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-            }
-            Spacer(Modifier.width(8.dp))
-            Text("New chat", fontWeight = FontWeight.SemiBold)
-          }
+          Spacer(Modifier.height(8.dp))
+          DrawerMenuRow(Icons.Default.PhotoLibrary, "Images") { scope.launch { drawerState.close() }; pickImage.launch("image/*") }
+          DrawerMenuRow(Icons.AutoMirrored.Filled.MenuBook, "Library") { scope.launch { drawerState.close() }; onAllChatsClick() }
+          DrawerMenuRow(Icons.Default.Folder, "Projects") { scope.launch { drawerState.close() }; onAgentsClick() }
+          DrawerMenuRow(Icons.Default.Schedule, "Scheduled") { scope.launch { drawerState.close() }; onActivityClick() }
+          DrawerMenuRow(Icons.Default.AlternateEmail, "Plugins") { scope.launch { drawerState.close() }; onConnectionsClick() }
         }
         HorizontalDivider(color = scheme.outlineVariant)
-        Row(
-          Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Text("RECENT", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
-          Spacer(Modifier.weight(1f))
-          Text("${conversations.size} of $convTotal", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
-        }
         val drawerListState = rememberLazyListState()
         LazyColumn(state = drawerListState, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp)) {
           if (conversations.isEmpty() && !convLoading) {
@@ -973,97 +995,129 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           }
         }
         HorizontalDivider(color = scheme.outlineVariant)
-        // All chats — dedicated screen with full pagination (§8).
+        // Floating bottom bar: accent Chat pill + avatar + waveform.
         Row(
-          Modifier
-            .fillMaxWidth()
-            .clickable {
+          Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Button(
+            onClick = {
+              createFreshChat()
               scope.launch { drawerState.close() }
-              onAllChatsClick()
+            },
+            enabled = !creatingChat,
+            modifier = Modifier.weight(1f).heightIn(min = 52.dp),
+            shape = RoundedCornerShape(26.dp),
+            colors = ButtonDefaults.buttonColors(
+              containerColor = scheme.primary,
+              contentColor = scheme.onPrimary,
+            ),
+          ) {
+            if (creatingChat) {
+              CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = scheme.onPrimary)
+            } else {
+              Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
             }
-            .padding(horizontal = 20.dp, vertical = 14.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Icon(Icons.Default.History, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(18.dp))
-          Spacer(Modifier.width(10.dp))
-          Text("All chats", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface, modifier = Modifier.weight(1f))
-          Text("$convTotal", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
-          Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Chat", fontWeight = FontWeight.SemiBold)
+          }
+          Spacer(Modifier.width(12.dp))
+          val avatarInitial = session.getEmail()?.trim()?.take(1)?.uppercase() ?: "N"
+          Surface(
+            onClick = { scope.launch { drawerState.close() }; onSettingsClick() },
+            shape = CircleShape,
+            color = novaGlassFill(),
+            border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge()),
+            modifier = Modifier.size(MinTouchTarget).semantics { role = Role.Button; contentDescription = "Settings" },
+          ) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+              Text(avatarInitial, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = scheme.onSurface)
+            }
+          }
+          Spacer(Modifier.width(8.dp))
+          Surface(
+            onClick = {
+              if (micGranted && voice.available) voice.start()
+              else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            },
+            shape = CircleShape,
+            color = scheme.primary,
+            modifier = Modifier.size(MinTouchTarget).semantics { role = Role.Button; contentDescription = "Voice input" },
+          ) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+              ) {
+                listOf(8.dp, 13.dp, 9.dp).forEach { h ->
+                  Box(Modifier.width(2.5.dp).height(h).clip(RoundedCornerShape(2.dp)).background(scheme.onPrimary))
+                }
+              }
+            }
+          }
         }
-        // Agents / Activity / Settings are top-level destinations in the bottom
-        // bar now; repeating them here would be a second, weaker navigation.
-        Row(
-          Modifier.fillMaxWidth().clickable { scope.launch { drawerState.close() }; onConnectionsClick() }
-            .padding(horizontal = 20.dp, vertical = 14.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Icon(Icons.Default.Link, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(18.dp))
-          Spacer(Modifier.width(10.dp))
-          Text("Connections", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = scheme.onSurface, modifier = Modifier.weight(1f))
-          Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = novaFaint(), modifier = Modifier.size(18.dp))
-        }
-        HorizontalDivider(color = scheme.outlineVariant)
       }
     },
   ) {
-  Column(
-    Modifier
-      .fillMaxSize()
-      .background(scheme.surface)
-  ) {
-    // Masthead: wordmark left, model + new-chat right. Single composed row, no stacked hero.
-    Surface(color = scheme.surface) {
-      Column {
-        Row(
-          Modifier.fillMaxWidth().padding(start = 6.dp, end = 8.dp, top = 8.dp, bottom = 2.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          IconButton(onClick = { scope.launch { drawerState.open() } }) {
-            Icon(Icons.Default.Menu, contentDescription = "Library", tint = scheme.onSurface)
-          }
-          Column(Modifier.weight(1f)) {
-            Text("Nova", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleLarge, color = scheme.onSurface)
-            Text(
-              if (conversations.isNotEmpty()) "${conversations.size} threads" else "A quiet place to think",
-              style = MaterialTheme.typography.labelSmall,
-              fontFamily = NovaMono,
-              color = scheme.onSurfaceVariant,
+  // No opaque screen background — ambient field carries through the thread.
+  Column(Modifier.fillMaxSize()) {
+    // Top bar: transparent over ambient, glass circle actions.
+      Row(
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        SpecCircleButton(
+          Icons.Default.Menu,
+          "Open library",
+          onClick = { scope.launch { drawerState.open() } },
+        )
+        Spacer(Modifier.weight(1f))
+        if (messages.isEmpty() && !streaming) {
+          SpecCircleButton(
+            Icons.Default.Edit,
+            "New chat",
+            onClick = { createFreshChat() },
+          )
+        } else {
+          SpecCircleButton(
+            Icons.Default.Edit,
+            "New chat",
+            onClick = { createFreshChat() },
+          )
+          Spacer(Modifier.width(8.dp))
+          var topMenu by remember { mutableStateOf(false) }
+          Box {
+            SpecCircleButton(
+              Icons.Default.MoreVert,
+              "Chat options",
+              onClick = { topMenu = true },
             )
-          }
-          if (models.isNotEmpty()) {
-            var expanded by remember { mutableStateOf(false) }
-            TextButton(onClick = { expanded = true }) {
-              Text(
-                model?.let { shortModel(it) } ?: "pick model",
-                fontFamily = NovaMono,
-                style = MaterialTheme.typography.labelMedium,
-                color = scheme.primary,
+            DropdownMenu(expanded = topMenu, onDismissRequest = { topMenu = false }, containerColor = novaGlassFill()) {
+              if (models.isNotEmpty()) {
+                models.forEach { m ->
+                  DropdownMenuItem(
+                    text = { Text(m.id, fontFamily = NovaMono, style = MaterialTheme.typography.bodySmall) },
+                    trailingIcon = if (model == m.id) {
+                      { Icon(Icons.Default.Check, contentDescription = "Selected model", modifier = Modifier.size(16.dp)) }
+                    } else null,
+                    onClick = {
+                      model = m.id; vm.model = m.id; topMenu = false
+                    },
+                  )
+                }
+              }
+              DropdownMenuItem(
+                text = { Text("Search chats") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                onClick = { topMenu = false; onAllChatsClick() },
               )
-            }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-              models.forEach { m ->
-                DropdownMenuItem(text = { Text(m.id, fontFamily = NovaMono, style = MaterialTheme.typography.bodySmall) }, onClick = {
-                  model = m.id; vm.model = m.id; expanded = false
-                })
-              }
-            }
-          }
-          if (messages.isNotEmpty()) {
-            IconButton(onClick = ::createFreshChat, enabled = !creatingChat) {
-              if (creatingChat) {
-                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = scheme.primary)
-              } else {
-                Icon(Icons.Default.Edit, contentDescription = "New chat", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
-              }
             }
           }
         }
-        HorizontalDivider(color = scheme.outlineVariant)
       }
-    }
 
     if (offline) {
-      Surface(color = scheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+      Surface(color = novaGlassFill(), modifier = Modifier.fillMaxWidth()) {
         Text(
           "Offline. Showing what is cached. Reconnect to keep going.",
           modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
@@ -1073,11 +1127,19 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
       }
     }
 
+    // Chat layout: the message list scrolls under a floating composer column.
+    // Reserve the composer height PLUS the full bottom chrome (bar + margin +
+    // nav inset) so the last message always rests clear above both.
+    val density = LocalDensity.current
+    var overlayPx by remember { mutableStateOf(0) }
+    val overlayDp = with(density) { overlayPx.toDp() }
+    val bottomChrome = LocalBottomChrome.current
+
     Box(Modifier.weight(1f)) {
     LazyColumn(
-      modifier = Modifier.fillMaxSize().background(scheme.surface),
+      modifier = Modifier.fillMaxSize(),
       state = listState,
-      contentPadding = PaddingValues(top = 12.dp, bottom = 16.dp),
+      contentPadding = PaddingValues(top = 12.dp, bottom = overlayDp + bottomChrome + NovaSpace.lg),
     ) {
       if (messages.isEmpty()) {
         item {
@@ -1096,14 +1158,44 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               color = scheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(18.dp))
-            // Executable starters: tap runs immediately (optimistic echo at
-            // t=0), not just fills the box. Hidden once the user types or
-            // while a run is in flight — first slot stays stable.
-            NovaSuggestionChips(
-              prompts = listOf("Summarize a file", "Plan my day", "Draft a reply"),
-              enabled = !streaming && !uploading,
-              onPick = { prompt -> vm.send(prompt) },
-            )
+            // Two-column starter cards (ref 5): tap runs immediately.
+            // Executable-chip behaviour kept; hidden while streaming/uploading.
+            val startersEnabled = !streaming && !uploading
+            listOf(
+              "Summarize a file" to "Drop a doc and get the short version.",
+              "Plan my day" to "Turn a messy list into a schedule.",
+              "Draft a reply" to "Answer email in your voice.",
+              "Search the web" to "Find it without leaving the chat.",
+            ).chunked(2).forEach { pair ->
+              Row(
+                horizontalArrangement = Arrangement.spacedBy(NovaSpace.sm),
+                modifier = Modifier.fillMaxWidth(),
+              ) {
+                pair.forEach { (prompt, blurb) ->
+                  NovaCard(
+                    onClick = { if (startersEnabled) vm.send(prompt) },
+                    contentPadding = PaddingValues(horizontal = NovaSpace.md, vertical = NovaSpace.md),
+                    modifier = Modifier.weight(1f),
+                  ) {
+                    Text(
+                      prompt,
+                      style = MaterialTheme.typography.titleSmall,
+                      fontWeight = FontWeight.SemiBold,
+                      color = scheme.onSurface,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                      blurb,
+                      style = MaterialTheme.typography.bodySmall,
+                      color = scheme.onSurfaceVariant,
+                      maxLines = 2,
+                    )
+                  }
+                }
+                if (pair.size == 1) Spacer(Modifier.weight(1f))
+              }
+              Spacer(Modifier.height(NovaSpace.sm))
+            }
           }
         }
       }
@@ -1188,15 +1280,18 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                   }
                 }
               }
+              // User bubble: primaryContainer fill + onPrimaryContainer ink —
+              // tonal accent, readable in both light and dark glass modes.
               Surface(
-                shape = RoundedCornerShape(22.dp, 22.dp, 6.dp, 22.dp),
-                color = scheme.primary,
-                contentColor = scheme.onPrimary,
+                shape = RoundedCornerShape(22.dp),
+                color = scheme.primaryContainer,
+                contentColor = scheme.onPrimaryContainer,
               ) {
                 Text(
                   highlightPluginMentions(m.content),
                   style = MaterialTheme.typography.bodyMedium,
-                  modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                  color = scheme.onPrimaryContainer,
+                  modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                 )
               }
               Spacer(Modifier.height(4.dp))
@@ -1218,29 +1313,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               }
             }
           } else {
-            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp)) {
-              // Actions ride the newest answer only; older ones reveal theirs on
-              // tap, so the transcript stays readable instead of sprouting four
-              // icons under every reply.
-              var showActions by remember(m.id) { mutableStateOf(false) }
-              val actionsVisible = showActions || i == messages.lastIndex
-              Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                  .clip(RoundedCornerShape(NovaRadius.sm))
-                  .clickable { showActions = !showActions }
-                  .semantics {
-                    role = Role.Button
-                    contentDescription = if (actionsVisible) "Hide message actions" else "Show message actions"
-                  },
-              ) {
-                Text("Nova", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
-                novaClockTime(m.createdAt)?.let { clock ->
-                  Spacer(Modifier.width(10.dp))
-                  Text(clock, style = MaterialTheme.typography.labelSmall, fontFamily = NovaMono, color = novaFaint())
-                }
-              }
-              Spacer(Modifier.height(6.dp))
+            // Spec S08: left-aligned white 16sp reply + action icon row.
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
               MarkdownBody(m.content, false)
               if (m.ui.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
@@ -1248,25 +1322,18 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                   if (url.startsWith("https://")) context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                 }
               }
-              AnimatedVisibility(
-                visible = actionsVisible,
-                enter = fadeIn(tween(NovaMotion.Quick)),
-                exit = fadeOut(tween(NovaMotion.Quick)),
-              ) {
-                Row(Modifier.offset(x = (-8).dp)) {
-                  BareAction(Icons.Default.ContentCopy, "Copy") { clipboard.setText(AnnotatedString(m.content)) }
-                  BareAction(Icons.AutoMirrored.Filled.VolumeUp, "Read aloud") { speakOut(m.content) }
-                  BareAction(Icons.Default.Share, "Share") {
-                    val send = Intent(Intent.ACTION_SEND).apply {
-                      type = "text/plain"; putExtra(Intent.EXTRA_TEXT, m.content)
-                    }
-                    context.startActivity(Intent.createChooser(send, "Share response"))
+              AssistantActionRow(
+                onCopy = { clipboard.setText(AnnotatedString(m.content)) },
+                onSpeak = { speakOut(m.content) },
+                onShare = {
+                  val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"; putExtra(Intent.EXTRA_TEXT, m.content)
                   }
-                  if (i == messages.lastIndex) {
-                    BareAction(Icons.Default.Refresh, "Regenerate") { vm.regenerate() }
-                  }
-                }
-              }
+                  context.startActivity(Intent.createChooser(send, "Share response"))
+                },
+                onRegenerate = { vm.regenerate() },
+                showRegenerate = i == messages.lastIndex,
+              )
             }
           }
         }
@@ -1275,20 +1342,15 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
       if (streamingMsg != null) {
         item(key = "streaming") {
           val sm = streamingMsg!!
-          Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              Text("Nova", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
-              novaClockTime(sm.createdAt)?.let { clock ->
-                Spacer(Modifier.width(10.dp))
-                Text(clock, style = MaterialTheme.typography.labelSmall, fontFamily = NovaMono, color = novaFaint())
-              }
-            }
-
-            // Step indicator (e.g. "Checking GitHub...") — expressive morph,
-            // not a static spinner. Backend step overrides the cycling phrase.
+          Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
+            // Spec S13 live status: globe + #B3B3B3 15sp text while searching.
             currentStep?.let { step ->
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🌐", fontSize = 20.sp)
+                Spacer(Modifier.width(8.dp))
+                Text(step, fontSize = 15.sp, color = scheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+              }
               Spacer(Modifier.height(6.dp))
-              NovaStepRow(step)
             }
 
             // Collapsible reasoning / thinking section
@@ -1298,7 +1360,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               Surface(
                 onClick = { reasoningExpanded = !reasoningExpanded },
                 shape = RoundedCornerShape(12.dp),
-                color = scheme.surfaceContainerHigh.copy(alpha = 0.5f),
+                color = novaGlassFill(),
                 modifier = Modifier.fillMaxWidth(),
               ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
@@ -1339,7 +1401,25 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
 
             Spacer(Modifier.height(6.dp))
             if (sm.content.isEmpty() && currentStep == null) {
-              NovaThinkingIndicator()
+              // Spec S09: 12dp violet dot pulsing at the left margin.
+              val pulse = rememberInfiniteTransition(label = "streamDot")
+              val dotAlpha by pulse.animateFloat(
+                initialValue = 0.35f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                  animation = tween(600, easing = FastOutSlowInEasing),
+                  repeatMode = RepeatMode.Reverse,
+                ),
+                label = "streamDotAlpha",
+              )
+              Box(
+                Modifier
+                  .size(12.dp)
+                  .graphicsLayer { alpha = dotAlpha }
+                  .clip(CircleShape)
+                  .background(scheme.primary)
+                  .semantics { contentDescription = "Nova is writing" },
+              )
             } else if (sm.content.isNotEmpty()) {
               MarkdownBody(sm.content, true)
             }
@@ -1358,7 +1438,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           Surface(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
             shape = RoundedCornerShape(16.dp),
-            color = scheme.surfaceVariant,
+            color = novaGlassFill(),
+            border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge()),
           ) {
             Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
               Text(novaErrorText(code), modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = scheme.onSurface)
@@ -1368,24 +1449,34 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
         }
       }
     }
-      // The way back down when the reader has scrolled away mid-stream.
-      Box(Modifier.align(Alignment.BottomCenter).padding(bottom = NovaSpace.md)) {
-        NovaJumpToLatest(
-          visible = !atBottom && messages.isNotEmpty(),
-          onClick = {
-            scope.launch {
-              val total = listState.layoutInfo.totalItemsCount
-              if (total > 0) listState.animateScrollToItem(total - 1)
-            }
-          },
-          label = if (streaming) "Following live" else "Latest",
-        )
-      }
+
+    // Floating jump control, parked above the composer column (composer
+    // height + bottom chrome + gap) so it never hides behind the chrome.
+    Box(Modifier.align(Alignment.BottomCenter).padding(bottom = bottomChrome + overlayDp + NovaSpace.md)) {
+      NovaJumpToLatest(
+        visible = !atBottom && messages.isNotEmpty(),
+        onClick = {
+          scope.launch {
+            val total = listState.layoutInfo.totalItemsCount
+            if (total > 0) listState.animateScrollToItem(total - 1)
+          }
+        },
+        label = if (streaming) "Following live" else "Latest",
+      )
     }
+
+    Column(
+      Modifier
+        .align(Alignment.BottomCenter)
+        .fillMaxWidth()
+        .padding(bottom = bottomChrome)
+        .imePadding()
+        .onGloballyPositioned { coords -> overlayPx = coords.size.height },
+    ) {
 
     if (pending.isNotEmpty() || uploading) {
       Row(
-        Modifier.fillMaxWidth().background(scheme.surface).padding(horizontal = 20.dp, vertical = 6.dp)
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)
           .horizontalScroll(rememberScrollState()),
         verticalAlignment = Alignment.CenterVertically,
       ) {
@@ -1395,7 +1486,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               }
         pending.forEach { p ->
           Row(
-            Modifier.padding(end = 8.dp).clip(RoundedCornerShape(12.dp)).background(scheme.surfaceVariant)
+            Modifier.padding(end = 8.dp).clip(RoundedCornerShape(12.dp)).background(novaGlassFill())
               .clickable { vm.removeAttachment(p.id) }.padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
           ) {
@@ -1423,8 +1514,14 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
       }
     }
 
-    // Composer: one rounded field, bare leading icons, single circular ink send.
-    Surface(color = scheme.surface, modifier = Modifier.imePadding()) {
+    // Composer: solid spec pill (#202020) floating over the thread — opaque
+    // so message text can never read through it.
+    GlassPanel(
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = 8.dp, vertical = 8.dp),
+      corner = RoundedCornerShape(NovaRadius.xl),
+    ) {
       Column {
         if (mentionCandidates.isNotEmpty()) {
           Row(
@@ -1434,7 +1531,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             mentionCandidates.forEach { p ->
               Surface(
                 shape = RoundedCornerShape(14.dp),
-                color = if (p.ready) scheme.secondary.copy(alpha = 0.14f) else scheme.surfaceVariant,
+                color = if (p.ready) scheme.secondary.copy(alpha = 0.14f) else novaGlassFill(),
                 modifier = Modifier.clickable {
                   val drop = (trailingMention?.length ?: 0) + 1
                   input = input.dropLast(drop) + "@${p.id} "
@@ -1470,64 +1567,29 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           )
         }
         Row(
-          Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+          Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
           verticalAlignment = Alignment.Bottom,
         ) {
-          GlassPanel(modifier = Modifier.weight(1f)) {
-            Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 6.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+          // Composer pill: + · placeholder · mic · accent action. Transparent
+          // field so the glass panel behind shows through.
+          Surface(
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(32.dp),
+            color = Color.Transparent,
+          ) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(start = 4.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
               Box {
-                IconButton(onClick = { showAttachMenu = true }, enabled = !uploading && !streaming, modifier = Modifier.size(40.dp)) {
-                  Icon(Icons.Default.Add, contentDescription = "Attach", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                IconButton(onClick = { showAttachMenu = true }, enabled = !uploading && !streaming, modifier = Modifier.size(48.dp)) {
+                  Icon(Icons.Default.Add, contentDescription = "Attach", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
                 }
-                DropdownMenu(expanded = showAttachMenu, onDismissRequest = { showAttachMenu = false }) {
-                  DropdownMenuItem(
-                    text = { Text("Camera") },
-                    leadingIcon = { Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                    onClick = {
-                      showAttachMenu = false
-                      if (cameraGranted) {
-                        launchCamera()
-                      } else {
-                        cameraPermission.launch(Manifest.permission.CAMERA)
-                      }
-                    },
-                  )
-                  DropdownMenuItem(
-                    text = { Text("Photos") },
-                    leadingIcon = { Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                    onClick = { showAttachMenu = false; pickImage.launch("image/*") },
-                  )
-                  DropdownMenuItem(
-                    text = { Text("Files") },
-                    leadingIcon = { Icon(Icons.Default.Attachment, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                    onClick = { showAttachMenu = false; pickFile.launch("*/*") },
-                  )
-                  DropdownMenuItem(
-                    text = { Text("Plugins") },
-                    leadingIcon = { Icon(Icons.Default.Code, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                    onClick = { showAttachMenu = false; onConnectionsClick() },
-                  )
-                }
-              }
-              // Discoverable @ trigger: tapping inserts "@" and drops focus
-              // back into the field, so the picker opens with the keyboard up.
-              IconButton(
-                onClick = {
-                  composerFocus.requestFocus()
-                  if (trailingMention == null) input += "@"
-                },
-                enabled = !streaming,
-                modifier = Modifier.size(40.dp),
-              ) {
-                Icon(Icons.Default.AlternateEmail, contentDescription = "Mention a plugin", tint = scheme.primary, modifier = Modifier.size(20.dp))
               }
               if (micGranted && voice.available) {
-                IconButton(onClick = { voice.start() }, modifier = Modifier.size(40.dp)) {
-                  Icon(Icons.Default.Mic, contentDescription = "Voice input", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                IconButton(onClick = { voice.start() }, modifier = Modifier.size(48.dp)) {
+                  Icon(Icons.Default.Mic, contentDescription = "Voice input", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
                 }
               } else {
-                IconButton(onClick = { micPermission.launch(Manifest.permission.RECORD_AUDIO) }, modifier = Modifier.size(40.dp)) {
-                  Icon(Icons.Default.Mic, contentDescription = "Enable voice input", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                IconButton(onClick = { micPermission.launch(Manifest.permission.RECORD_AUDIO) }, modifier = Modifier.size(48.dp)) {
+                  Icon(Icons.Default.Mic, contentDescription = "Enable voice input", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
                 }
               }
               val primaryColor = scheme.primary
@@ -1538,7 +1600,13 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                 visualTransformation = VisualTransformation { text ->
                   TransformedText(highlightPluginMentions(text.text, primaryColor), OffsetMapping.Identity)
                 },
-                placeholder = { Text("Message Nova…", color = scheme.onSurfaceVariant) },
+                placeholder = {
+                  Text(
+                    if (messages.isEmpty()) "Ask Nova" else "Reply to Nova",
+                    fontSize = 16.sp,
+                    color = scheme.onSurfaceVariant,
+                  )
+                },
                 maxLines = 5,
                 shape = RoundedCornerShape(20.dp),
                 // Sentence capitalisation: typing a prompt on a phone keyboard
@@ -1567,24 +1635,77 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                   focusedBorderColor = Color.Transparent,
                 ),
               )
-              // One slot morphs Send <-> Stop (150-200ms + haptic), never two
-              // buttons flickering side by side. 48dp per MinTouchTarget.
-              NovaSendStopButton(
-                streaming = streaming,
-                sendEnabled = input.isNotBlank() && !uploading,
-                onSend = {
-                  vm.send(input)
-                  input = ""
+              // Composer morph: waveform (voice) → up arrow (send) → stop.
+              SpecAccentButton(
+                state = when {
+                  streaming -> SpecAccentState.STOP
+                  input.isNotBlank() -> SpecAccentState.SEND_READY
+                  else -> SpecAccentState.VOICE_IDLE
                 },
-                onStop = { vm.stop() },
+                enabled = !uploading && (streaming || input.isNotBlank() || (micGranted && voice.available)),
+                onClick = {
+                  when {
+                    streaming -> vm.stop()
+                    input.isNotBlank() -> {
+                      vm.send(input)
+                      input = ""
+                    }
+                    micGranted && voice.available -> voice.start()
+                    else -> micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                  }
+                },
               )
             }
           }
         }
       }
     }
+    } // overlay Column
+    } // Box
+
+    // Attach menu: ModalBottomSheet glass tiles (Camera / Photos / Files / Plugins).
+    if (showAttachMenu) {
+      ModalBottomSheet(
+        onDismissRequest = { showAttachMenu = false },
+        containerColor = novaGlassFill(),
+        contentColor = scheme.onSurface,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+      ) {
+        Column(
+          Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp).padding(bottom = 28.dp),
+          verticalArrangement = Arrangement.spacedBy(NovaSpace.sm),
+        ) {
+          listOf(
+            Triple(Icons.Default.CameraAlt, "Camera") {
+              showAttachMenu = false
+              if (cameraGranted) launchCamera() else cameraPermission.launch(Manifest.permission.CAMERA)
+            },
+            Triple(Icons.Default.PhotoLibrary, "Photos") { showAttachMenu = false; pickImage.launch("image/*") },
+            Triple(Icons.Default.Attachment, "Files") { showAttachMenu = false; pickFile.launch("*/*") },
+            Triple(Icons.Default.Code, "Plugins") { showAttachMenu = false; onConnectionsClick() },
+          ).forEach { (icon, label, action) ->
+            Surface(
+              onClick = action,
+              shape = RoundedCornerShape(NovaRadius.md),
+              color = Color.Transparent,
+              border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge()),
+              modifier = Modifier.fillMaxWidth(),
+            ) {
+              Row(
+                Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+              ) {
+                Icon(icon, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(14.dp))
+                Text(label, fontSize = 16.sp, color = scheme.onSurface)
+              }
+            }
+          }
+        }
+      }
+    }
   }
-  }
+}
 }
 
 @Composable fun AgentsScreen(api: NovaApi, onBack: (() -> Unit)? = null) {
@@ -1614,8 +1735,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   val live = agents.count { it.status == "active" }
 
   LazyColumn(
-    Modifier.fillMaxSize().background(scheme.surface).padding(horizontal = 20.dp),
-    contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp),
+    Modifier.fillMaxSize().padding(horizontal = 20.dp),
+    contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp + LocalBottomChrome.current),
     verticalArrangement = Arrangement.spacedBy(14.dp),
   ) {
     item {
@@ -1628,7 +1749,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     }
     // Builder island: the one composed object on this screen.
     item {
-      Surface(shape = RoundedCornerShape(24.dp), color = scheme.surfaceVariant, tonalElevation = 2.dp) {
+      GlassPanel(corner = RoundedCornerShape(NovaRadius.xl)) {
         Column(Modifier.padding(20.dp)) {
           Text("Describe the job", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
           Spacer(Modifier.height(4.dp))
@@ -1641,7 +1762,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             minLines = 2, maxLines = 4,
             shape = RoundedCornerShape(16.dp),
             colors = OutlinedTextFieldDefaults.colors(
-              unfocusedContainerColor = scheme.surface, focusedContainerColor = scheme.surface,
+              unfocusedContainerColor = novaGlassFill(), focusedContainerColor = novaGlassFill(),
               unfocusedTextColor = scheme.onSurface, focusedTextColor = scheme.onSurface,
               cursorColor = scheme.primary, unfocusedBorderColor = scheme.outlineVariant, focusedBorderColor = scheme.primary,
             ),
@@ -1668,7 +1789,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     built?.let { obj ->
       item {
         val questions = obj["questions"]?.let { runCatching { it.jsonArray.map { q -> q.jsonPrimitive.content } }.getOrNull() }
-        Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), color = scheme.surfaceContainerHigh) {
+        GlassPanel(Modifier.fillMaxWidth(), corner = RoundedCornerShape(NovaRadius.lg)) {
           Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (questions != null) {
               Text("Two things first", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
@@ -1844,7 +1965,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             }
             runOutput?.let {
               Spacer(Modifier.height(NovaSpace.md))
-              Surface(shape = RoundedCornerShape(NovaRadius.sm), color = scheme.surface) {
+              Surface(shape = RoundedCornerShape(NovaRadius.sm), color = novaGlassFill(), border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge())) {
                 Text(
                   it,
                   fontFamily = NovaMono,
@@ -1884,8 +2005,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   val shown = if (filter == "All") executions else executions.filter { it.status.equals(filter, true) }
 
   LazyColumn(
-    Modifier.fillMaxSize().background(scheme.surface).padding(horizontal = 20.dp),
-    contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp),
+    Modifier.fillMaxSize().padding(horizontal = 20.dp),
+    contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp + LocalBottomChrome.current),
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     item {
@@ -1970,7 +2091,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             }
             detail?.output?.let {
               Spacer(Modifier.height(8.dp))
-              Surface(shape = RoundedCornerShape(12.dp), color = scheme.surface) {
+              Surface(shape = RoundedCornerShape(NovaRadius.sm), color = novaGlassFill(), border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge())) {
                 Text(it, fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurface, modifier = Modifier.padding(12.dp))
               }
             }
@@ -2048,8 +2169,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   }
 
   LazyColumn(
-    Modifier.fillMaxSize().background(scheme.surface).padding(horizontal = 20.dp),
-    contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp),
+    Modifier.fillMaxSize().padding(horizontal = 20.dp),
+    contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp + LocalBottomChrome.current),
   ) {
     item {
       NovaPageHeader(
@@ -2131,7 +2252,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           }
           Box {
             NovaIconAction(Icons.Default.MoreVert, "Chat options for ${c.title.ifBlank { "this chat" }}") { menu = true }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = novaGlassFill()) {
               DropdownMenuItem(
                 text = { Text("Rename") },
                 leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) },
@@ -2177,6 +2298,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   pendingDelete?.let { target ->
     AlertDialog(
       onDismissRequest = { pendingDelete = null },
+      containerColor = novaGlassFill(),
       title = { Text("Delete chat?", fontFamily = NovaDisplay) },
       text = {
         Text(
@@ -2206,6 +2328,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     var title by remember(target.id) { mutableStateOf(target.title) }
     AlertDialog(
       onDismissRequest = { renaming = null },
+      containerColor = novaGlassFill(),
       title = { Text("Rename chat", fontFamily = NovaDisplay) },
       text = {
         OutlinedTextField(
@@ -2279,8 +2402,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   }
 
   LazyColumn(
-    modifier = Modifier.fillMaxSize().background(scheme.surface).padding(horizontal = 20.dp),
-    contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp),
+    modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp),
+    contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp + LocalBottomChrome.current),
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     item {
@@ -2300,7 +2423,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
       val connected = p.state == "connected"
       val needsReconnect = p.state == "needs_reconnect"
       val isConnecting = connecting == p.id
-      Surface(shape = RoundedCornerShape(20.dp), color = scheme.surfaceVariant, tonalElevation = 1.dp) {
+      GlassPanel(corner = RoundedCornerShape(NovaRadius.xl)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
           Text(
             glyphOf[p.id] ?: "?",
@@ -2400,7 +2523,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     }
     item {
       // §18 LeetCode — server-keyed, no connection needed. Always ready in chat.
-      Surface(shape = RoundedCornerShape(20.dp), color = scheme.surfaceVariant, tonalElevation = 1.dp) {
+      GlassPanel(corner = RoundedCornerShape(NovaRadius.xl)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
           Text("LC", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineMedium, color = scheme.primary, modifier = Modifier.width(34.dp))
           Column(modifier = Modifier.weight(1f)) {
@@ -2424,6 +2547,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
         var formError by remember { mutableStateOf<String?>(null) }
         AlertDialog(
           onDismissRequest = { if (!busy) vercelDialog = false },
+          containerColor = novaGlassFill(),
           title = { Text("Connect Vercel", fontFamily = NovaDisplay) },
           text = {
             Column {
@@ -2456,6 +2580,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
         var formError by remember { mutableStateOf<String?>(null) }
         AlertDialog(
           onDismissRequest = { if (!busy) supabaseDialog = false },
+          containerColor = novaGlassFill(),
           title = { Text("Connect Supabase", fontFamily = NovaDisplay) },
           text = {
             Column {
@@ -2515,137 +2640,139 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
   }
 
+  // Glass page: per-row glass cards, section labels, red log-out card at the end.
   LazyColumn(
-    modifier = Modifier.fillMaxSize().background(scheme.surface).padding(horizontal = 20.dp),
-    contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp),
-    verticalArrangement = Arrangement.spacedBy(14.dp),
+    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+    contentPadding = PaddingValues(top = 12.dp, bottom = 28.dp + LocalBottomChrome.current),
+    verticalArrangement = Arrangement.spacedBy(6.dp),
   ) {
     item {
-      NovaPageHeader(
-        title = "Settings",
-        subtitle = "Yours to tune. Nova stays out of the way.",
-        onBack = onBack,
+      // Header: back circle left, account name 17px tertiary centered.
+      Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        if (onBack != null) {
+          SpecCircleButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", onClick = onBack)
+        }
+        Text(
+          displayEmail,
+          modifier = Modifier.align(Alignment.Center).padding(horizontal = 56.dp),
+          fontSize = 17.sp,
+          color = scheme.onSurfaceVariant,
+          maxLines = 1,
+        )
+      }
+    }
+
+    item { SpecSectionLabel("Account", modifier = Modifier.padding(top = 8.dp)) }
+
+    item {
+      SpecSettingsRow(
+        label = displayEmail,
+        subtitle = "Signed in",
+        leading = {
+          Text(initial, fontWeight = FontWeight.Bold, fontSize = 18.sp, color = scheme.primary)
+        },
+      )
+    }
+
+    item { SpecSectionLabel("Model & accounts", modifier = Modifier.padding(top = 8.dp)) }
+
+    item {
+      // Model policy — what Nova runs on, stated plainly (§7).
+      SpecSettingsRow(
+        label = "Model",
+        subtitle = "Gemini 3.1 Flash Lite for chat. Gemini 3.5 Flash Lite handles tools and images.",
       )
     }
 
     item {
-      Surface(shape = RoundedCornerShape(22.dp), color = scheme.surfaceVariant, tonalElevation = 1.dp) {
-        Row(Modifier.padding(horizontal = 20.dp, vertical = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-          // Bare serif initial. No gradient tile, no filled avatar box.
-          Text(initial, fontFamily = NovaDisplay, style = MaterialTheme.typography.displaySmall, color = scheme.primary, modifier = Modifier.width(44.dp))
-          Column(modifier = Modifier.weight(1f)) {
-            Text("Account", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
-            Spacer(Modifier.height(2.dp))
-            Text(displayEmail, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, maxLines = 1)
+      // Connected accounts — one tap to the Connections screen (§38).
+      SpecSettingsRow(
+        label = "Connected accounts",
+        subtitle = "GitHub, Gmail, Calendar, Drive, Docs, Sheets, Vercel, Supabase, LeetCode",
+        onClick = onConnectionsClick,
+        leading = {
+          Icon(Icons.Default.Link, contentDescription = null, tint = scheme.onSurface, modifier = Modifier.size(24.dp))
+        },
+        trailing = {
+          Icon(
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = scheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
+          )
+        },
+      )
+    }
+
+    item { SpecSectionLabel("Notifications", modifier = Modifier.padding(top = 8.dp)) }
+
+    item {
+      SpecSettingsRow(
+        label = "Agent notifications",
+        subtitle = if (granted) "On. Runs report back." else "Off. Runs stay silent.",
+        leading = {
+          Icon(Icons.Default.Notifications, contentDescription = null, tint = scheme.onSurface, modifier = Modifier.size(24.dp))
+        },
+        trailing = {
+          if (Build.VERSION.SDK_INT >= 33) {
+            Switch(
+              checked = granted,
+              onCheckedChange = { on ->
+                if (on) request.launch(Manifest.permission.POST_NOTIFICATIONS)
+                else {
+                  granted = false
+                  context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                  })
+                }
+              },
+            )
+          } else {
+            Text("System", fontSize = 14.sp, color = scheme.onSurfaceVariant)
           }
-          Text("Signed in", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.secondary)
-        }
-      }
+        },
+      )
     }
 
     item {
-      Text("MODEL & ACCOUNTS", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = scheme.primary, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
+      SpecSettingsRow(
+        label = "Read responses aloud",
+        subtitle = "Nova voice, on tap of any answer",
+        leading = {
+          Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, tint = scheme.onSurface, modifier = Modifier.size(24.dp))
+        },
+        trailing = {
+          Text("On tap", fontSize = 14.sp, color = scheme.onSurfaceVariant)
+        },
+      )
     }
 
-    item {
-      Surface(shape = RoundedCornerShape(22.dp), color = scheme.surfaceVariant, tonalElevation = 1.dp) {
-        Column {
-          // Model policy — what Nova runs on, stated plainly (§7).
-          Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-              Text("Model", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = scheme.onSurface)
-              Spacer(Modifier.height(2.dp))
-              Text("Gemini 3.1 Flash Lite for chat. Gemini 3.5 Flash Lite handles tools and images.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-            }
-          }
-          HorizontalDivider(color = scheme.outlineVariant)
-          // Connected accounts — one tap to the Connections screen (§38).
-          Row(
-            Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable { onConnectionsClick() }.padding(horizontal = 20.dp, vertical = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-          ) {
-            Column(modifier = Modifier.weight(1f)) {
-              Text("Connected accounts", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = scheme.onSurface)
-              Spacer(Modifier.height(2.dp))
-              Text("GitHub, Gmail, Calendar, Drive, Docs, Sheets, Vercel, Supabase, LeetCode", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-            }
-          Text("Active", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.secondary)
-          }
-        }
-      }
-    }
+    item { SpecSectionLabel("Appearance", modifier = Modifier.padding(top = 8.dp)) }
 
     item {
-      Text("HOW NOVA REACHES YOU", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = scheme.primary, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
-    }
-
-    item {
-      Surface(shape = RoundedCornerShape(22.dp), color = scheme.surfaceVariant, tonalElevation = 1.dp) {
-        Column {
-          Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-              Text("Agent notifications", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = scheme.onSurface)
-              Spacer(Modifier.height(2.dp))
-              Text(
-                if (granted) "On. Runs report back." else "Off. Runs stay silent.",
-                style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
-              )
-            }
-            Spacer(Modifier.width(12.dp))
-            if (Build.VERSION.SDK_INT >= 33) {
-              Switch(
-                checked = granted,
-                onCheckedChange = { on ->
-                  if (on) request.launch(Manifest.permission.POST_NOTIFICATIONS)
-                  else {
-                    granted = false
-                    context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                      putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
-                    })
-                  }
-                },
-              )
-            } else {
-              Text("System", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
-            }
-          }
-          HorizontalDivider(color = scheme.outlineVariant)
-          Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-              Text("Read responses aloud", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = scheme.onSurface)
-              Spacer(Modifier.height(2.dp))
-              Text("Nova voice, on tap of any answer", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-            }
-            Text("On tap", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
-          }
-        }
-      }
-    }
-
-    item {
-      Text("APPEARANCE", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = scheme.primary, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
-    }
-
-    item {
-      // §39: the theme is already plumbed through NovaTheme, so it needs a
-      // switch the user can actually reach. Pinning dark on an AMOLED panel is
-      // the whole reason the palette exists.
+      // Spec S27 theme picker: System (Default) · Light · Dark rows.
       val currentMode = NovaThemeMode.entries.find {
         it.name.equals(AccentPreferences.getThemeMode(context), ignoreCase = true)
       } ?: NovaThemeMode.SYSTEM
-      Surface(shape = RoundedCornerShape(22.dp), color = scheme.surfaceVariant, tonalElevation = 1.dp) {
-        Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
-          Text("Theme", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = scheme.onSurface)
-          Spacer(Modifier.height(2.dp))
-          Text("System follows your phone. Light and Dark pin Nova.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-          Spacer(Modifier.height(12.dp))
-          NovaFilterChips(
-            options = NovaThemeMode.entries.map { it.label },
-            selected = currentMode.label,
-            onSelect = { label ->
-              NovaThemeMode.entries.firstOrNull { it.label == label }?.let { mode ->
-                AccentPreferences.setThemeMode(context, mode.name)
-                onPreferencesChanged()
+      Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf(
+          NovaThemeMode.SYSTEM to "System (Default)",
+          NovaThemeMode.LIGHT to "Light",
+          NovaThemeMode.DARK to "Dark",
+        ).forEach { (mode, label) ->
+          SpecSettingsRow(
+            label = "Appearance",
+            subtitle = label,
+            onClick = {
+              AccentPreferences.setThemeMode(context, mode.name)
+              onPreferencesChanged()
+            },
+            leading = {
+              Icon(Icons.Default.Settings, contentDescription = null, tint = scheme.onSurface, modifier = Modifier.size(24.dp))
+            },
+            trailing = {
+              if (mode == currentMode) {
+                Icon(Icons.Default.Check, contentDescription = "Selected", tint = scheme.primary, modifier = Modifier.size(20.dp))
               }
             },
           )
@@ -2654,92 +2781,78 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     }
 
     item {
+      // Spec S28 accent picker: 16px dot + 15px label rows, check on the active.
       val currentAccentName = AccentPreferences.get(context)
-      val currentAccent = NovaAccent.entries.find { it.name.equals(currentAccentName, ignoreCase = true) } ?: NovaAccent.BRONZE
-      Surface(shape = RoundedCornerShape(22.dp), color = scheme.surfaceVariant, tonalElevation = 1.dp) {
-        Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
-          Text("Choose a tone", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = scheme.onSurface)
-          Spacer(Modifier.height(14.dp))
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-          ) {
-            NovaAccent.entries.forEach { accent ->
-              val selected = accent == currentAccent
-              val previewDark = isSystemInDarkTheme()
-              val previewColor = remember(accent, previewDark) {
-                val pairs = mapOf(
-                  NovaAccent.BRONZE to (Color(0xFFE2B26B) to Color(0xFF7A5320)),
-                  NovaAccent.SLATE to (Color(0xFF8EACBD) to Color(0xFF3A6070)),
-                  NovaAccent.SAGE to (Color(0xFF9DB89A) to Color(0xFF3E6B3A)),
-                  NovaAccent.TERRACOTTA to (Color(0xFFE08E7E) to Color(0xFF9C3B2A)),
-                  NovaAccent.PLUM to (Color(0xFFC4A0D0) to Color(0xFF6B4080)),
-                )
-                if (previewDark) pairs[accent]!!.first else pairs[accent]!!.second
+      val currentAccent = NovaAccent.entries.find { it.name.equals(currentAccentName, ignoreCase = true) } ?: NovaAccent.PURPLE
+      val dotColors = mapOf(
+        NovaAccent.BLUE to Color(0xFF6B9BF5),
+        NovaAccent.WHITE to Color(0xFFF0F0F0),
+        NovaAccent.GREEN to Color(0xFF6FCF97),
+        NovaAccent.YELLOW to Color(0xFFE3C568),
+        NovaAccent.PINK to Color(0xFFF08BB8),
+        NovaAccent.ORANGE to Color(0xFFF09A5C),
+        NovaAccent.PURPLE to Color(0xFFA270F0),
+      )
+      Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+          "Accent color — ${currentAccent.label}",
+          fontSize = 15.sp,
+          color = scheme.onSurfaceVariant,
+          modifier = Modifier.padding(top = 8.dp),
+        )
+        NovaAccent.entries.forEach { accent ->
+          SpecSettingsRow(
+            label = accent.label,
+            onClick = {
+              AccentPreferences.set(context, accent.name)
+              onPreferencesChanged()
+            },
+            leading = {
+              Box(
+                Modifier.size(16.dp).clip(CircleShape).background(dotColors[accent] ?: Color.White),
+              )
+            },
+            trailing = {
+              if (accent == currentAccent) {
+                Icon(Icons.Default.Check, contentDescription = "Selected", tint = scheme.primary, modifier = Modifier.size(20.dp))
               }
-              Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(
-                  modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(previewColor)
-                    .semantics {
-                      contentDescription = "${accent.label} accent${if (selected) ", selected" else ""}"
-                      role = Role.RadioButton
-                      stateDescription = if (selected) "Selected" else "Not selected"
-                    }
-                    .clickable {
-                      AccentPreferences.set(context, accent.name)
-                      onPreferencesChanged()
-                    },
-                  contentAlignment = Alignment.Center,
-                ) {
-                  if (selected) {
-                    Surface(
-                      shape = CircleShape,
-                      color = Color.White.copy(alpha = 0.3f),
-                      modifier = Modifier.size(20.dp),
-                    ) {}
-                  }
-                }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                  accent.label,
-                  style = MaterialTheme.typography.labelSmall,
-                  fontFamily = NovaMono,
-                  color = if (selected) scheme.primary else scheme.onSurfaceVariant,
-                )
-              }
-            }
-          }
-        }
-      }
-    }
-
-    item {
-      Text("ABOUT THIS COPY", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = scheme.primary, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
-    }
-
-    item {
-      Surface(shape = RoundedCornerShape(22.dp), color = scheme.surfaceVariant, tonalElevation = 1.dp) {
-        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
-          Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Nova", Modifier.weight(1f), fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
-            Text("v0.1.0", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
-          }
-          Spacer(Modifier.height(6.dp))
-          Text(
-            "A personal assistant with voice, agents and ties into the tools you already use.",
-            style = MaterialTheme.typography.bodySmall,
-            color = scheme.onSurfaceVariant,
+            },
           )
         }
       }
     }
 
+    item { SpecSectionLabel("About", modifier = Modifier.padding(top = 8.dp)) }
+
     item {
-      TextButton(onClick = { showSignOutConfirm = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-        Text("Sign out", color = scheme.error, fontWeight = FontWeight.SemiBold)
+      SpecSettingsRow(
+        label = "Nova",
+        subtitle = "v0.1.0 — voice, agents and ties into the tools you already use.",
+      )
+    }
+
+    item {
+      // Log out: full-width h56 glass r12, error icon + error label.
+      Surface(
+        onClick = { showSignOutConfirm = true },
+        shape = RoundedCornerShape(NovaRadius.md),
+        color = novaGlassFill(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge()),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp).semantics { role = Role.Button; contentDescription = "Log out" },
+      ) {
+        Row(
+          Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 16.dp, vertical = 12.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Icon(
+            Icons.AutoMirrored.Filled.Logout,
+            contentDescription = null,
+            tint = scheme.error,
+            modifier = Modifier.size(24.dp),
+          )
+          Spacer(Modifier.width(12.dp))
+          Text("Log out", fontSize = 16.sp, color = scheme.error)
+        }
       }
     }
   }
@@ -2747,11 +2860,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   if (showSignOutConfirm) {
     AlertDialog(
       onDismissRequest = { showSignOutConfirm = false },
-      title = { Text("Sign out of Nova?", fontFamily = NovaDisplay) },
+      containerColor = novaGlassFill(),
+      title = { Text("Log out of Nova?") },
       text = { Text("You can sign back in anytime. Your conversations remain on your account.", color = scheme.onSurfaceVariant) },
       confirmButton = {
         TextButton(onClick = { showSignOutConfirm = false; onLogout() }) {
-          Text("Sign out", color = scheme.error, fontWeight = FontWeight.SemiBold)
+          Text("Log out", color = scheme.error, fontWeight = FontWeight.SemiBold)
         }
       },
       dismissButton = {

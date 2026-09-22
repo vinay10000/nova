@@ -9,7 +9,7 @@ object AccentPreferences {
 
   fun get(context: Context): String =
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-      .getString(KEY_ACCENT, "bronze") ?: "bronze"
+      .getString(KEY_ACCENT, "purple") ?: "purple"
 
   fun set(context: Context, name: String) {
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

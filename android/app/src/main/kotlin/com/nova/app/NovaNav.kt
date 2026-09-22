@@ -3,7 +3,10 @@ package com.nova.app
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AccountTree
@@ -11,7 +14,11 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -26,10 +33,10 @@ import com.nova.app.data.SessionToken
 import com.nova.app.data.createNovaApi
 
 /**
- * App shell. §5 top-level destinations live in a bottom navigation bar — they
- * were previously reachable only through the chat drawer, which hides four
- * primary surfaces behind one tap and gives no sense of place. The drawer now
- * holds only conversation history, which is chat context, not app navigation.
+ * App shell. §5 top-level destinations live in a floating pill bar over a
+ * solid bottom floor — the floor stops scroll content bleeding through the
+ * pill's margins and the navigation inset. Screens read [LocalBottomChrome]
+ * for bottom clearance.
  *
  * Navigation rules kept here so screens never touch the controller:
  *   - Tab tap  : single instance, per-tab state saved and restored.
@@ -42,6 +49,10 @@ private data class NovaTab(val route: String, val label: String, val icon: Image
 /** Routes that are children of a tab: the bar stays as the way out. */
 private val childRoutes = mapOf("allchats" to "chat", "connections" to "settings")
 
+/** Floating pill geometry — screens reserve this via LocalBottomChrome. */
+private val TabBarHeight = 60.dp
+private val TabBarMargin = 12.dp
+
 @Composable
 fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
   val nav = rememberNavController()
@@ -51,7 +62,12 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
   val chatVm: ChatViewModel = viewModel()
   var authenticated by remember { mutableStateOf(session.get() != null) }
   if (!authenticated) {
-    LoginScreen(api) { token -> session.save(token); authenticated = true }
+    // Logged-out chrome is zero: no bar, no clearance. Status bar still cleared.
+    CompositionLocalProvider(LocalBottomChrome provides 0.dp) {
+      Box(Modifier.fillMaxSize().statusBarsPadding()) {
+        LoginScreen(api) { token -> session.save(token); authenticated = true }
+      }
+    }
     return
   }
 
@@ -76,6 +92,10 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
   val density = LocalDensity.current
   val imeVisible = WindowInsets.ime.getBottom(density) > 0
   val showBar = !imeVisible
+
+  // Clearance for scroll content under the floating bar (bar + margin + nav inset).
+  val navBars = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+  val bottomChrome = if (showBar) TabBarHeight + TabBarMargin + navBars else 0.dp
 
   fun goToTab(target: String) {
     if (target == selectedTab) {
@@ -102,46 +122,74 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
     }
   }
 
-  Scaffold(
-    containerColor = MaterialTheme.colorScheme.surface,
-    bottomBar = {
+  CompositionLocalProvider(LocalBottomChrome provides bottomChrome) {
+    Box(Modifier.fillMaxSize()) {
+      // Screens content. The floor strip and pill bar sit as siblings above.
+      Box(
+        Modifier
+          .fillMaxSize()
+          .statusBarsPadding(),
+      ) {
+        NavHost(nav, startDestination = "chat") {
+          tabComposable("chat") {
+            ChatScreen(
+              api, session,
+              onSettingsClick = { goToTab("settings") },
+              onConnectionsClick = { nav.navigate("connections") },
+              onAgentsClick = { goToTab("agents") },
+              onActivityClick = { goToTab("activity") },
+              onAllChatsClick = { nav.navigate("allchats") },
+              vm = chatVm,
+            )
+          }
+          childComposable("allchats") {
+            AllChatsScreen(
+              api,
+              onOpen = { id, history ->
+                chatVm.openConversation(id, history)
+                nav.popBackStack()
+              },
+              onBack = { nav.popBackStack() },
+            )
+          }
+          tabComposable("agents") { AgentsScreen(api) }
+          tabComposable("activity") { ActivityScreen(api) }
+          childComposable("connections") { ConnectionsScreen(api, session, onBack = { nav.popBackStack() }) }
+          tabComposable("settings") {
+            SettingsScreen(
+              session,
+              onLogout = { session.clear(); authenticated = false },
+              onPreferencesChanged = onPreferencesChanged,
+              onConnectionsClick = { nav.navigate("connections") },
+            )
+          }
+        }
+      }
+
+      // Solid floor under the pill: covers the bar band + nav inset so list
+      // content scrolling behind the floating bar never shows in its margins.
+      if (showBar) {
+        Box(
+          Modifier
+            .align(Alignment.BottomCenter)
+            .fillMaxWidth()
+            .height(bottomChrome)
+            .background(if (novaDark()) Color(0xFF121214) else Color(0xFFEFEAE1)),
+        )
+      }
+
       AnimatedVisibility(
         visible = showBar,
         enter = slideInVertically(tween(NovaMotion.Standard)) { it } + fadeIn(tween(NovaMotion.Standard)),
         exit = slideOutVertically(tween(NovaMotion.Quick)) { it } + fadeOut(tween(NovaMotion.Quick)),
+        modifier = Modifier
+          .align(Alignment.BottomCenter)
+          .padding(bottom = TabBarMargin + navBars),
       ) {
-        NovaBottomBar(tabs = tabs, selected = selectedTab, onSelect = ::goToTab)
-      }
-    },
-  ) { pad ->
-    NavHost(nav, startDestination = "chat", modifier = Modifier.padding(pad)) {
-      tabComposable("chat") {
-        ChatScreen(
-          api, session,
-          onConnectionsClick = { nav.navigate("connections") },
-          onAllChatsClick = { nav.navigate("allchats") },
-          vm = chatVm,
-        )
-      }
-      childComposable("allchats") {
-        AllChatsScreen(
-          api,
-          onOpen = { id, history ->
-            chatVm.openConversation(id, history)
-            nav.popBackStack()
-          },
-          onBack = { nav.popBackStack() },
-        )
-      }
-      tabComposable("agents") { AgentsScreen(api) }
-      tabComposable("activity") { ActivityScreen(api) }
-      childComposable("connections") { ConnectionsScreen(api, session, onBack = { nav.popBackStack() }) }
-      tabComposable("settings") {
-        SettingsScreen(
-          session,
-          onLogout = { session.clear(); authenticated = false },
-          onPreferencesChanged = onPreferencesChanged,
-          onConnectionsClick = { nav.navigate("connections") },
+        NovaBottomBar(
+          tabs = tabs,
+          selected = selectedTab,
+          onSelect = ::goToTab,
         )
       }
     }
@@ -170,26 +218,60 @@ private fun NavGraphBuilder.childComposable(route: String, content: @Composable 
   ) { content() }
 }
 
+/**
+ * Floating pill tab bar. Icon + label, active state is a tonal ink
+ * shift (never a dot). Solid spec fill so scroll content cannot read
+ * through it on any device.
+ */
 @Composable
-private fun NovaBottomBar(tabs: List<NovaTab>, selected: String, onSelect: (String) -> Unit) {
+private fun NovaBottomBar(
+  tabs: List<NovaTab>,
+  selected: String,
+  onSelect: (String) -> Unit,
+) {
   val scheme = MaterialTheme.colorScheme
-  NavigationBar(
-    containerColor = if (novaDark()) NovaPalette.DarkSurface else scheme.surface,
-    tonalElevation = 0.dp,
+  val shape = RoundedCornerShape(NovaRadius.xl)
+  Surface(
+    shape = shape,
+    color = novaGlassFill(),
+    border = BorderStroke(1.dp, novaGlassEdge()),
   ) {
-    tabs.forEach { tab ->
-      val isSelected = tab.route == selected
-      NavigationBarItem(
-        selected = isSelected,
-        onClick = { onSelect(tab.route) },
-        icon = { Icon(tab.icon, contentDescription = null, modifier = Modifier.size(22.dp)) },
-        label = { Text(tab.label, style = MaterialTheme.typography.labelSmall) },
-        alwaysShowLabel = true,
-        modifier = Modifier.semantics {
-          role = Role.Tab
-          contentDescription = if (isSelected) "${tab.label}, selected" else tab.label
-        },
-      )
+    Row(
+      Modifier
+        .height(TabBarHeight)
+        .padding(horizontal = NovaSpace.sm, vertical = NovaSpace.xs),
+      horizontalArrangement = Arrangement.spacedBy(NovaSpace.xs),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      tabs.forEach { tab ->
+        val isSelected = tab.route == selected
+        val ink = if (isSelected) scheme.primary else scheme.onSurfaceVariant
+        Surface(
+          onClick = { onSelect(tab.route) },
+          shape = RoundedCornerShape(NovaRadius.lg),
+          color = if (isSelected) scheme.primary.copy(alpha = 0.12f) else Color.Transparent,
+          modifier = Modifier
+            .height(48.dp)
+            .semantics {
+              role = Role.Tab
+              contentDescription = if (isSelected) "${tab.label}, selected" else tab.label
+            },
+        ) {
+          Row(
+            Modifier.padding(horizontal = NovaSpace.md),
+            horizontalArrangement = Arrangement.spacedBy(NovaSpace.xs),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Icon(tab.icon, contentDescription = null, tint = ink, modifier = Modifier.size(20.dp))
+            Text(
+              tab.label,
+              style = MaterialTheme.typography.labelSmall,
+              color = ink,
+              fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+            )
+          }
+        }
+      }
     }
   }
 }

@@ -90,3 +90,7 @@ Nova/
 ## 2026-09-18 UI/UX overhaul
 
 - Android app redesigned: docs/UI.md has the full list. Design system in NovaDesign.kt (theme modes, tokens, shared components), bottom navigation in NovaNav.kt, streaming-scroll fix, truthful timestamps, 48dp touch targets, delete confirms, server-backed chat search/rename/archive, WCAG contrast fixes, login rewrite. All compiles clean (:app:compileDebugKotlin).
+
+## 2026-09-22 Glassmorphism overhaul
+
+- Full glass redesign with Haze 1.7.3 (classic API). Two Haze states (root for tab bar, chatHaze for composer overlay), fill-only glass for in-flow cards/dialogs, floating glass tab bar via LocalBottomChrome, ambient tonal gradient, ChatScreen composer as measured floating overlay, attach → ModalBottomSheet, all AlertDialogs/DropdownMenus glass, two-column starter cards, 48dp everywhere (SpecCircleButton/SpecAccentButton/jump/drawer circles raised), login headline no longer entrance-gated. Final anti-slop re-check done; dead code removed (ChatSpec, NovaSuggestionChips, NovaStepRow, NovaSendStopButton). docs/UI.md has the full glass design system notes. :app:compileDebugKotlin green.
