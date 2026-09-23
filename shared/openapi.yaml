@@ -124,6 +124,12 @@ paths:
     get: { summary: Gmail OAuth callback (§38), responses: { '200': { description: redirect } } }
   /v1/connections/gmail/status:
     get: { summary: Gmail connection status (§38), responses: { '200': { description: ok } } }
+  /v1/connections/calendar/authorize:
+    get: { summary: Start Calendar OAuth (§38 — same Google client as Gmail), responses: { '200': { description: ok } } }
+  /v1/connections/calendar/callback:
+    get: { summary: Calendar OAuth callback (§38), responses: { '200': { description: redirect } } }
+  /v1/connections/calendar/status:
+    get: { summary: Calendar connection status (§38), responses: { '200': { description: ok } } }
   /v1/plugins:
     get: { summary: Chat plugins — @mentions (§42: github,gmail,leetcode,calendar,drive,docs,sheets,vercel,supabase), responses: { '200': { description: ok } } }
   /v1/connections/drive/authorize:

@@ -9,11 +9,28 @@ All screens draw from shared tokens and components instead of hard-coded colors 
 - **Theme modes** — `NovaThemeMode` (System / Light / Dark), persisted via `AccentPreferences`, applied in `MainActivity`. The status bar icon contrast is synced to the active mode. The app is AMOLED-first in dark mode.
 - **Accent** — a user-selectable accent color drives `primary`; contrast-checked derivatives (on-primary, container tones) are computed from it rather than hard-coded.
 - **Spacing, radius, motion** — `NovaSpace`, `NovaRadius`, `NovaMotion` tokens (durations ~150–350 ms, standard easing).
+- **Shape lock** — one stated radius scale, no ad-hoc values anywhere:
+  `hair 2` (progress tracks, chart bars, ticks) · `sm 10` (chips, tags, small inputs) ·
+  `row 12` (grouped rows, thumbnails) · `md 16` (cards, popups, text areas) ·
+  `lg 20` (menus, sheets, composer field) · `bubble 22` (chat bubbles) ·
+  `xl 26` (floating tab pill). **Actions are pills** — every button passes
+  `CircleShape`, never a radius. Audited mechanically: `RoundedCornerShape(<n>.dp)`
+  occurrences in Kotlin = 0.
+- **Motion curve** — `NovaMotion.Ease` is the strong ease-out
+  `CubicBezierEasing(0.23, 1, 0.32, 1)` used by every entrance, screen transition
+  and data-fill (all non-gesture timing stays under 300 ms). `NovaMotion.Pulse`
+  (`FastOutSlowInEasing`) is reserved for infinite loading pulses only — it is
+  never used for an entrance.
+- **Ambient tokens** — `NovaAmbient` owns the background field stops; the bottom
+  floor strip under the tab bar reuses the same pair instead of restating hex.
+- **Tabular figures** — `NovaTabular` (`fontFeatureSettings = "tnum"`) is merged
+  into any proportional-font number that counts or changes, so digits never shift
+  their neighbours while streaming.
 - **Components** — `NovaPageHeader`, `NovaEyebrow`, `NovaStatusPill`, `NovaCard`, `NovaEmptyState`, `NovaSkeletonCards` (shimmer), `NovaFilterChips` (real `FilterChip`, so TalkBack announces selection state), `NovaIconAction` (48 dp minimum touch target with semantics), `NovaButton` (with loading state), `novaFieldColors()`, `NovaJumpToLatest`, `NovaThinkingIndicator`, `NovaApprovalRow`, `SpecCircleButton`, `SpecAccentButton` (voice → send → stop morph, 48 dp).
 
 ## Navigation (`NovaNav.kt`)
 
-- **Bottom navigation bar** with four top-level destinations: Chat, Agents, Activity, Settings. Previously all four were hidden behind a hamburger drawer, which hurt discoverability and engagement (standard Nielsen Norman finding on hidden navigation).
+- **Bottom navigation bar** with four top-level destinations: Chat, Agents, Activity, Settings. Connections is a child screen (from Settings, drawer, or OAuth return), not a bottom tab. Previously destinations were hidden behind a hamburger drawer, which hurt discoverability and engagement (standard Nielsen Norman finding on hidden navigation).
 - Correct `NavHost` flags: `launchSingleTop`, `restoreState`, `saveState`/`popUpTo` so tab switches preserve scroll and state.
 - Slide + fade transitions between tabs; the bar hides while the IME is open so the chat composer owns the keyboard inset.
 - The drawer remains a chat-context surface: recent conversations, search-free quick list, Connections entry. Duplicate Agents/Activity/Settings rows were removed.
@@ -35,7 +52,7 @@ All screens draw from shared tokens and components instead of hard-coded colors 
 
 - **Discoverable trigger** — an `@` icon button in the composer inserts `@` and refocuses the field, opening the picker with the keyboard still up. Previously the feature was invisible unless the user already knew to type `@`.
 - **Live filtering** — typing after `@` narrows the candidate chips; a bare `@` lists every plugin with its blurb. Unconnected plugins show "Not connected" instead of failing silently later.
-- **No-match feedback** — a query that matches nothing explains itself (`No plugin named "…" — try @browser, @github, @gmail…`) instead of silently hiding the picker.
+- **No-match feedback** — a query that matches nothing explains itself (`No plugin named "…", try @browser, @github, @gmail…`) instead of silently hiding the picker.
 - **Visual confirmation** — completed mentions render in mono font with a tinted background both while typing (input transform) and in the sent bubble.
 
 ## Feature parity with the backend

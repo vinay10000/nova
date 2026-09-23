@@ -7,10 +7,20 @@
   <application android:label="Nova" android:theme="@style/Theme.Nova"
     android:icon="@mipmap/ic_launcher" android:supportsRtl="true">
     <activity android:name=".MainActivity" android:exported="true"
+      android:launchMode="singleTask"
       android:windowSoftInputMode="adjustResize">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
         <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+      <!-- §38 OAuth return leg: the backend redirects the browser to
+           nova://connections/{provider}/{status} after the provider callback.
+           BROWSABLE is required so the browser may hand the intent to us. -->
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <category android:name="android.intent.category.BROWSABLE" />
+        <data android:scheme="nova" android:host="connections" />
       </intent-filter>
     </activity>
     <provider

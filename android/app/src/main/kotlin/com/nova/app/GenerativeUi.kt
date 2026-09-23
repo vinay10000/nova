@@ -1,7 +1,6 @@
 package com.nova.app
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -147,7 +146,7 @@ private fun blockCopyText(block: UiBlockDto): String = when (block.type) {
   }
   "timeline" ->
     block.steps.joinToString("\n") { s ->
-      listOfNotNull("[${s.status}]", s.label, s.detail, s.value).joinToString(" — ")
+      listOfNotNull("[${s.status}]", s.label, s.detail, s.value).joinToString(": ")
     }
   "comparison" -> buildString {
     appendLine("${block.compare?.leftLabel.orEmpty()}\t${block.compare?.rightLabel.orEmpty()}")
@@ -382,7 +381,7 @@ private fun UiMetricsCard(
           Spacer(Modifier.height(3.dp))
           Text(
             metric.value,
-            style = MaterialTheme.typography.headlineSmall,
+            style = MaterialTheme.typography.headlineSmall.merge(NovaTabular),
             fontWeight = FontWeight.Bold,
             color = ink,
             maxLines = 2,
@@ -612,13 +611,13 @@ private fun ProgressTrack(fraction: Float, trackColor: Color) {
   val fill = MaterialTheme.colorScheme.primary
   val animated = remember { Animatable(0f) }
   LaunchedEffect(fraction) {
-    animated.animateTo(fraction.coerceIn(0f, 1f), tween(650, easing = FastOutSlowInEasing))
+    animated.animateTo(fraction.coerceIn(0f, 1f), tween(NovaMotion.Standard, easing = NovaMotion.Ease))
   }
   Box(
     Modifier
       .fillMaxWidth()
       .height(6.dp)
-      .clip(RoundedCornerShape(3.dp))
+      .clip(RoundedCornerShape(NovaRadius.hair))
       .background(trackColor),
   ) {
     // Width, not scaleY: caps stay circular for the whole transition.
@@ -626,7 +625,7 @@ private fun ProgressTrack(fraction: Float, trackColor: Color) {
       Modifier
         .fillMaxHeight()
         .fillMaxWidth(animated.value)
-        .clip(RoundedCornerShape(3.dp))
+        .clip(RoundedCornerShape(NovaRadius.hair))
         .background(fill),
     )
   }
@@ -684,7 +683,7 @@ private fun UiTimelineCard(
             Modifier
               .width(2.dp)
               .height(28.dp)
-              .clip(RoundedCornerShape(1.dp))
+              .clip(RoundedCornerShape(NovaRadius.hair))
               .background(if (status == "done") success.copy(alpha = 0.45f) else edge),
           )
         }
@@ -887,7 +886,7 @@ private fun UiChartCard(
     val edge = MaterialTheme.colorScheme.outlineVariant
     val negColor = novaToneColor(NovaTone.Danger)
     val anim = remember { Animatable(0f) }
-    LaunchedEffect(points) { anim.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
+    LaunchedEffect(points) { anim.animateTo(1f, tween(NovaMotion.Standard, easing = NovaMotion.Ease)) }
 
     val values = points.map { it.value }
     val maxV = values.maxOrNull()?.coerceAtLeast(0f) ?: 1f

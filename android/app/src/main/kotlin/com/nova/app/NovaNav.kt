@@ -1,5 +1,6 @@
 package com.nova.app
 
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
@@ -18,7 +19,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -69,6 +69,22 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
       }
     }
     return
+  }
+
+  // §38: OAuth deep link return (nova://connections/{provider}/{status}) —
+  // land on Connections so the user sees the result instead of the chat.
+  val oauthPending = OAuthDeepLink.pending.value
+  LaunchedEffect(oauthPending) {
+    val raw = oauthPending ?: return@LaunchedEffect
+    OAuthDeepLink.pending.value = null
+    val uri = Uri.parse(raw)
+    if (uri.pathSegments.getOrNull(1) == "error") {
+      OAuthDeepLink.notice.value = uri.getQueryParameter("error") ?: "unknown_error"
+    }
+    nav.navigate("connections") {
+      popUpTo("chat") { saveState = true }
+      launchSingleTop = true
+    }
   }
 
   val tabs = remember {
@@ -135,10 +151,10 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
             ChatScreen(
               api, session,
               onSettingsClick = { goToTab("settings") },
-              onConnectionsClick = { nav.navigate("connections") },
+              onConnectionsClick = { nav.navigate("connections") { launchSingleTop = true } },
               onAgentsClick = { goToTab("agents") },
               onActivityClick = { goToTab("activity") },
-              onAllChatsClick = { nav.navigate("allchats") },
+              onAllChatsClick = { nav.navigate("allchats") { launchSingleTop = true } },
               vm = chatVm,
             )
           }
@@ -160,7 +176,7 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
               session,
               onLogout = { session.clear(); authenticated = false },
               onPreferencesChanged = onPreferencesChanged,
-              onConnectionsClick = { nav.navigate("connections") },
+              onConnectionsClick = { nav.navigate("connections") { launchSingleTop = true } },
             )
           }
         }
@@ -174,16 +190,17 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
             .align(Alignment.BottomCenter)
             .fillMaxWidth()
             .height(bottomChrome)
-            .background(if (novaDark()) Color(0xFF121214) else Color(0xFFEFEAE1)),
+            .background(if (novaDark()) NovaAmbient.BottomDark else NovaAmbient.BottomLight),
         )
       }
 
       AnimatedVisibility(
         visible = showBar,
-        enter = slideInVertically(tween(NovaMotion.Standard)) { it } + fadeIn(tween(NovaMotion.Standard)),
-        exit = slideOutVertically(tween(NovaMotion.Quick)) { it } + fadeOut(tween(NovaMotion.Quick)),
+        enter = slideInVertically(tween(NovaMotion.Standard, easing = NovaMotion.Ease)) { it } + fadeIn(tween(NovaMotion.Standard, easing = NovaMotion.Ease)),
+        exit = slideOutVertically(tween(NovaMotion.Quick, easing = NovaMotion.Ease)) { it } + fadeOut(tween(NovaMotion.Quick, easing = NovaMotion.Ease)),
         modifier = Modifier
           .align(Alignment.BottomCenter)
+          .padding(horizontal = TabBarMargin * 2)
           .padding(bottom = TabBarMargin + navBars),
       ) {
         NovaBottomBar(
@@ -200,10 +217,10 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
 private fun NavGraphBuilder.tabComposable(route: String, content: @Composable () -> Unit) {
   composable(
     route,
-    enterTransition = { fadeIn(tween(NovaMotion.Standard)) },
-    exitTransition = { fadeOut(tween(NovaMotion.Quick)) },
-    popEnterTransition = { fadeIn(tween(NovaMotion.Standard)) },
-    popExitTransition = { fadeOut(tween(NovaMotion.Quick)) },
+    enterTransition = { fadeIn(tween(NovaMotion.Standard, easing = NovaMotion.Ease)) },
+    exitTransition = { fadeOut(tween(NovaMotion.Quick, easing = NovaMotion.Ease)) },
+    popEnterTransition = { fadeIn(tween(NovaMotion.Standard, easing = NovaMotion.Ease)) },
+    popExitTransition = { fadeOut(tween(NovaMotion.Quick, easing = NovaMotion.Ease)) },
   ) { content() }
 }
 
@@ -211,15 +228,21 @@ private fun NavGraphBuilder.tabComposable(route: String, content: @Composable ()
 private fun NavGraphBuilder.childComposable(route: String, content: @Composable () -> Unit) {
   composable(
     route,
-    enterTransition = { slideInHorizontally(tween(NovaMotion.Standard)) { it / 4 } + fadeIn(tween(NovaMotion.Standard)) },
-    exitTransition = { fadeOut(tween(NovaMotion.Quick)) },
-    popEnterTransition = { fadeIn(tween(NovaMotion.Standard)) },
-    popExitTransition = { slideOutHorizontally(tween(NovaMotion.Standard)) { it / 4 } + fadeOut(tween(NovaMotion.Standard)) },
+    enterTransition = {
+      slideInHorizontally(tween(NovaMotion.Standard, easing = NovaMotion.Ease)) { it / 4 } +
+        fadeIn(tween(NovaMotion.Standard, easing = NovaMotion.Ease))
+    },
+    exitTransition = { fadeOut(tween(NovaMotion.Quick, easing = NovaMotion.Ease)) },
+    popEnterTransition = { fadeIn(tween(NovaMotion.Standard, easing = NovaMotion.Ease)) },
+    popExitTransition = {
+      slideOutHorizontally(tween(NovaMotion.Standard, easing = NovaMotion.Ease)) { it / 4 } +
+        fadeOut(tween(NovaMotion.Standard, easing = NovaMotion.Ease))
+    },
   ) { content() }
 }
 
 /**
- * Floating pill tab bar. Icon + label, active state is a tonal ink
+ * Floating pill tab bar. Icon only, active state is a tonal ink
  * shift (never a dot). Solid spec fill so scroll content cannot read
  * through it on any device.
  */
@@ -252,23 +275,14 @@ private fun NovaBottomBar(
           color = if (isSelected) scheme.primary.copy(alpha = 0.12f) else Color.Transparent,
           modifier = Modifier
             .height(48.dp)
+            .weight(1f)
             .semantics {
               role = Role.Tab
               contentDescription = if (isSelected) "${tab.label}, selected" else tab.label
             },
         ) {
-          Row(
-            Modifier.padding(horizontal = NovaSpace.md),
-            horizontalArrangement = Arrangement.spacedBy(NovaSpace.xs),
-            verticalAlignment = Alignment.CenterVertically,
-          ) {
-            Icon(tab.icon, contentDescription = null, tint = ink, modifier = Modifier.size(20.dp))
-            Text(
-              tab.label,
-              style = MaterialTheme.typography.labelSmall,
-              color = ink,
-              fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-            )
+          Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Icon(tab.icon, contentDescription = null, tint = ink, modifier = Modifier.size(22.dp))
           }
         }
       }

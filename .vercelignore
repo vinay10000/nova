@@ -1,0 +1,25 @@
+# Deploy only backend + root vercel config.
+android/
+.gradle-home/
+.gradle/
+.gradle-home*/
+gradle-home*/
+emu-home/
+emu-tmp/
+node_modules/
+backend/node_modules/
+backend/dist/
+backend/.env
+*.apk
+*.aab
+*.png
+*.jpg
+*.log
+*.err
+*.jks
+*.keystore
+.vercel/
+.idea/
+.vscode/
+AGENTS.md
+opencode.json

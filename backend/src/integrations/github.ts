@@ -52,8 +52,6 @@ export function buildGitHubAuthorizeUrl(userId: string): {
     // PKCE: S256 challenge
     code_challenge: createHash('sha256').update(codeVerifier).digest('base64url'),
     code_challenge_method: 'S256',
-    // Force consent so user always sees what scopes are granted
-    prompt: 'consent',
   });
 
   return {

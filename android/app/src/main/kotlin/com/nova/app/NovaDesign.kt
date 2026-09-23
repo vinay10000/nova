@@ -3,6 +3,7 @@ package com.nova.app
 import android.app.Activity
 import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -51,6 +52,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -124,10 +126,35 @@ object NovaSpace {
 }
 
 object NovaRadius {
+  /**
+   * Shape lock (derived from assets/ui-reconstruction-spec.md). Every rounded
+   * rectangle in the app picks one of these — never an ad-hoc `14.dp`:
+   *
+   *   hair 2   micro fills: progress tracks, chart bars, status ticks
+   *   sm  10   chips, tags, small inputs, skeleton bars
+   *   row 12   grouped list rows, thumbnails
+   *   md  16   cards, popup panels, text areas, message surfaces
+   *   lg  20   menus, sheets, the composer field
+   *   bubble 22 chat bubbles (spec S08/S09)
+   *   xl  26   floating chrome (tab pill) and pill-height actions
+   *
+   * Actions are pills: pass [CircleShape] to any button, never a radius.
+   */
+  val hair = 2.dp
   val sm = 10.dp
+  val row = 12.dp
   val md = 16.dp
   val lg = 20.dp
+  val bubble = 22.dp
   val xl = 26.dp
+}
+
+/** Ambient field stops — the floor strip under the tab bar reuses this pair. */
+object NovaAmbient {
+  val TopDark = Color(0xFF0A0A0C)
+  val BottomDark = Color(0xFF121214)
+  val TopLight = Color(0xFFFDFCF9)
+  val BottomLight = Color(0xFFEFEAE1)
 }
 
 /**
@@ -138,8 +165,21 @@ object NovaMotion {
   const val Quick = 140
   const val Standard = 220
   const val Slow = 320
-  val Ease = FastOutSlowInEasing
+  /**
+   * Strong ease-out — the curve for every entrance and screen transition.
+   * Built-in Compose curves are too weak: an entrance must arrive, never
+   * ease in. Everything non-gesture stays under 300 ms (Quick/Standard).
+   */
+  val Ease = CubicBezierEasing(0.23f, 1f, 0.32f, 1f)
+  /** Symmetric curve for infinite loading pulses only. Never an entrance. */
+  val Pulse = FastOutSlowInEasing
 }
+
+/**
+ * Tabular figures. Merge into any style rendering something that counts,
+ * times or prices, so a changing digit never shifts its neighbours.
+ */
+val NovaTabular = TextStyle(fontFeatureSettings = "tnum")
 
 /** Android's minimum touch target. Nothing tappable may be smaller. */
 val MinTouchTarget = 48.dp
@@ -173,9 +213,9 @@ val LocalBottomChrome = staticCompositionLocalOf { 0.dp }
 @Composable
 fun novaAmbientBrush(): Brush =
   if (novaDark()) {
-    Brush.verticalGradient(listOf(Color(0xFF0A0A0C), Color(0xFF121214)))
+    Brush.verticalGradient(listOf(NovaAmbient.TopDark, NovaAmbient.BottomDark))
   } else {
-    Brush.verticalGradient(listOf(Color(0xFFFDFCF9), Color(0xFFEFEAE1)))
+    Brush.verticalGradient(listOf(NovaAmbient.TopLight, NovaAmbient.BottomLight))
   }
 
 /** Fill-only glass surface color (in-flow cards, dialogs, menus across windows). */
@@ -635,7 +675,7 @@ fun NovaSkeleton(
   val alpha by transition.animateFloat(
     initialValue = 0.35f,
     targetValue = 0.8f,
-    animationSpec = infiniteRepeatable(tween(900, easing = NovaMotion.Ease), RepeatMode.Reverse),
+    animationSpec = infiniteRepeatable(tween(900, easing = NovaMotion.Pulse), RepeatMode.Reverse),
     label = "skeletonAlpha",
   )
   Box(
@@ -677,7 +717,7 @@ fun NovaSkeletonCards(rows: Int = 3, height: Dp = 92.dp) {
             .padding(NovaSpace.xl)
             .fillMaxWidth(0.6f)
             .height(12.dp)
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(NovaRadius.sm))
             .background(edge),
         )
       }
@@ -753,7 +793,7 @@ fun NovaButton(
     onClick = onClick,
     enabled = enabled && !loading,
     modifier = modifier.heightIn(min = 52.dp),
-    shape = RoundedCornerShape(NovaRadius.xl),
+    shape = CircleShape,
     colors = ButtonDefaults.buttonColors(
       containerColor = if (tone == NovaTone.Danger) scheme.error else scheme.primary,
       contentColor = Color.White,
@@ -780,8 +820,8 @@ fun NovaButton(
 fun NovaJumpToLatest(visible: Boolean, onClick: () -> Unit, label: String = "Latest") {
   AnimatedVisibility(
     visible = visible,
-    enter = fadeIn(tween(NovaMotion.Quick)) + scaleIn(tween(NovaMotion.Quick), initialScale = 0.9f),
-    exit = fadeOut(tween(NovaMotion.Quick)) + scaleOut(tween(NovaMotion.Quick), targetScale = 0.9f),
+    enter = fadeIn(tween(NovaMotion.Quick, easing = NovaMotion.Ease)) + scaleIn(tween(NovaMotion.Quick, easing = NovaMotion.Ease), initialScale = 0.9f),
+    exit = fadeOut(tween(NovaMotion.Quick, easing = NovaMotion.Ease)) + scaleOut(tween(NovaMotion.Quick, easing = NovaMotion.Ease), targetScale = 0.9f),
   ) {
     Surface(
       onClick = onClick,
@@ -864,7 +904,7 @@ fun NovaThinkingIndicator(
         initialValue = 0.25f,
         targetValue = 0.95f,
         animationSpec = infiniteRepeatable(
-          animation = tween(520, delayMillis = index * 170, easing = NovaMotion.Ease),
+          animation = tween(520, delayMillis = index * 170, easing = NovaMotion.Pulse),
           repeatMode = RepeatMode.Reverse,
         ),
         label = "novaDot$index",
@@ -925,7 +965,7 @@ fun NovaApprovalRow(
         maxLines = 1,
       )
       Text(
-        if (writeLike) "Write action — review before allowing" else "Read action — low risk",
+        if (writeLike) "Write action: review before allowing" else "Read action: low risk",
         style = MaterialTheme.typography.labelSmall,
         color = scheme.onSurfaceVariant,
       )
@@ -1054,7 +1094,7 @@ fun SpecAccentButton(
         horizontalArrangement = Arrangement.spacedBy(2.dp),
       ) {
         listOf(8.dp, 13.dp, 9.dp).forEach { h ->
-          Box(Modifier.width(2.5.dp).height(h).clip(RoundedCornerShape(2.dp)).background(Color.White))
+          Box(Modifier.width(2.5.dp).height(h).clip(RoundedCornerShape(NovaRadius.hair)).background(Color.White))
         }
       }
       SpecAccentState.SEND_READY -> Icon(
@@ -1063,7 +1103,7 @@ fun SpecAccentButton(
         modifier = Modifier.size(18.dp).graphicsLayer { rotationZ = 180f },
       )
       SpecAccentState.STOP -> Box(
-        Modifier.size(12.dp).clip(RoundedCornerShape(2.dp)).background(Color.White),
+        Modifier.size(12.dp).clip(RoundedCornerShape(NovaRadius.hair)).background(Color.White),
       )
     }
   }

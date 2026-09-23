@@ -678,6 +678,17 @@ const PROVIDER_CATALOG: { id: string; name: string; blurb: string; envKeys: stri
 
 const IMPLEMENTED_PROVIDERS = new Set(['github', 'gmail', 'calendar', 'drive', 'vercel', 'supabase']);
 
+// §38: deep link back to the Android app. Success lands on Connections with
+// "connected"; failures use {scheme}://connections/{provider}/error?error=<code>
+// so the browser never dead-ends on a JSON error page — the app shows the notice.
+function appDeepLink(provider: string, status: string, errorCode?: string): string {
+  const scheme = process.env.DEEP_LINK_SCHEME ?? 'nova';
+  const base = `${scheme}://connections/${provider}/${status}`;
+  if (!errorCode) return base;
+  const safe = errorCode.replace(/[^a-zA-Z0-9_]/g, '') || 'provider_error';
+  return `${base}?error=${encodeURIComponent(safe)}`;
+}
+
 // §38: providers the client can offer to connect, with live per-user state.
 app.get('/v1/connections/providers', async (req, reply) => {
   const userId = await requireUser(req, reply);
@@ -750,29 +761,31 @@ app.get('/v1/connections/github/authorize', async (req, reply) => {
 // GitHub read scopes are declared with the provider catalogue above.
 
 // §38: GitHub OAuth callback — exchanges code for token, stores encrypted connection.
+// Every outcome redirects to the app via deep link so the browser never dead-ends.
 app.get('/v1/connections/github/callback', async (req, reply) => {
-  const { code, state } = req.query as { code?: string; state?: string };
-  if (!code || !state) return reply.code(400).send({ error: 'missing_code_or_state' });
+  const { code, state, error } = req.query as { code?: string; state?: string; error?: string };
+  if (error) return reply.redirect(appDeepLink('github', 'error', error));
+  if (!code || !state) return reply.redirect(appDeepLink('github', 'error', 'missing_code_or_state'));
 
-  // Look up the state row
   const stateRow = await db.oAuthState.findUnique({ where: { state } });
-  if (!stateRow) return reply.code(400).send({ error: 'invalid_state' });
+  if (!stateRow || stateRow.provider !== 'github') {
+    if (stateRow) await db.oAuthState.delete({ where: { state } }).catch(() => {});
+    return reply.redirect(appDeepLink('github', 'error', 'invalid_state'));
+  }
   if (stateRow.expiresAt < new Date()) {
     await db.oAuthState.delete({ where: { state } });
-    return reply.code(400).send({ error: 'state_expired' });
+    return reply.redirect(appDeepLink('github', 'error', 'state_expired'));
   }
 
   try {
     const tokens = await exchangeCodeForToken(code, stateRow.codeVerifier);
     await storeGitHubConnection(db, stateRow.userId, tokens);
     await db.oAuthState.delete({ where: { state } });
-    // Redirect to the Android app via deep link — the app resumes from the Connections screen.
-    const deepLink = process.env.DEEP_LINK_SCHEME ?? 'nova';
-    return reply.redirect(`${deepLink}://connections/github/connected`);
+    return reply.redirect(appDeepLink('github', 'connected'));
   } catch (err) {
     req.log.error(err);
     await db.oAuthState.delete({ where: { state } }).catch(() => {});
-    return reply.code(500).send({ error: 'github_token_exchange_failed' });
+    return reply.redirect(appDeepLink('github', 'error', 'token_exchange_failed'));
   }
 });
 
@@ -847,30 +860,33 @@ app.get('/v1/connections/gmail/authorize', async (req, reply) => {
 });
 
 // §38: Gmail OAuth callback — exchanges code, stores encrypted connection.
-// Backend-only; redirects to the app via deep link.
+// Every outcome redirects to the app via deep link so the browser never dead-ends.
 app.get('/v1/connections/gmail/callback', async (req, reply) => {
-  const { code, state } = req.query as { code?: string; state?: string };
-  if (!code || !state) return reply.code(400).send({ error: 'missing_code_or_state' });
+  const { code, state, error } = req.query as { code?: string; state?: string; error?: string };
+  if (error) return reply.redirect(appDeepLink('gmail', 'error', error));
+  if (!code || !state) return reply.redirect(appDeepLink('gmail', 'error', 'missing_code_or_state'));
 
   const stateRow = await db.oAuthState.findUnique({ where: { state } });
-  if (!stateRow) return reply.code(400).send({ error: 'invalid_state' });
+  if (!stateRow || stateRow.provider !== 'gmail') {
+    if (stateRow) await db.oAuthState.delete({ where: { state } }).catch(() => {});
+    return reply.redirect(appDeepLink('gmail', 'error', 'invalid_state'));
+  }
   if (stateRow.expiresAt < new Date()) {
     await db.oAuthState.delete({ where: { state } });
-    return reply.code(400).send({ error: 'state_expired' });
+    return reply.redirect(appDeepLink('gmail', 'error', 'state_expired'));
   }
 
   try {
     const tokens = await exchangeCodeForGmailToken(code, stateRow.codeVerifier);
     await storeGmailConnection(db, stateRow.userId, tokens);
     await db.oAuthState.delete({ where: { state } });
-    const deepLink = process.env.DEEP_LINK_SCHEME ?? 'nova';
-    return reply.redirect(`${deepLink}://connections/gmail/connected`);
+    return reply.redirect(appDeepLink('gmail', 'connected'));
   } catch (err) {
     req.log.error(err);
     await db.oAuthState.delete({ where: { state } }).catch(() => {});
     const msg = err instanceof Error ? err.message : '';
-    if (/refresh_token/.test(msg)) return reply.code(500).send({ error: 'gmail_refresh_token_missing' });
-    return reply.code(500).send({ error: 'gmail_token_exchange_failed' });
+    if (/refresh_token/.test(msg)) return reply.redirect(appDeepLink('gmail', 'error', 'refresh_token_missing'));
+    return reply.redirect(appDeepLink('gmail', 'error', 'token_exchange_failed'));
   }
 });
 
@@ -921,27 +937,31 @@ app.get('/v1/connections/calendar/authorize', async (req, reply) => {
   }
 });
 
+// §38: Calendar OAuth callback — every outcome redirects to the app via deep link.
 app.get('/v1/connections/calendar/callback', async (req, reply) => {
-  const { code, state } = req.query as { code?: string; state?: string };
-  if (!code || !state) return reply.code(400).send({ error: 'missing_code_or_state' });
+  const { code, state, error } = req.query as { code?: string; state?: string; error?: string };
+  if (error) return reply.redirect(appDeepLink('calendar', 'error', error));
+  if (!code || !state) return reply.redirect(appDeepLink('calendar', 'error', 'missing_code_or_state'));
   const stateRow = await db.oAuthState.findUnique({ where: { state } });
-  if (!stateRow) return reply.code(400).send({ error: 'invalid_state' });
+  if (!stateRow || stateRow.provider !== 'calendar') {
+    if (stateRow) await db.oAuthState.delete({ where: { state } }).catch(() => {});
+    return reply.redirect(appDeepLink('calendar', 'error', 'invalid_state'));
+  }
   if (stateRow.expiresAt < new Date()) {
     await db.oAuthState.delete({ where: { state } });
-    return reply.code(400).send({ error: 'state_expired' });
+    return reply.redirect(appDeepLink('calendar', 'error', 'state_expired'));
   }
   try {
     const tokens = await exchangeCalendarCode(code, stateRow.codeVerifier);
     await storeCalendarConnection(db, stateRow.userId, tokens);
     await db.oAuthState.delete({ where: { state } });
-    const deepLink = process.env.DEEP_LINK_SCHEME ?? 'nova';
-    return reply.redirect(`${deepLink}://connections/calendar/connected`);
+    return reply.redirect(appDeepLink('calendar', 'connected'));
   } catch (err) {
     req.log.error(err);
     await db.oAuthState.delete({ where: { state } }).catch(() => {});
     const msg = err instanceof Error ? err.message : '';
-    if (/refresh_token/.test(msg)) return reply.code(500).send({ error: 'calendar_refresh_token_missing' });
-    return reply.code(500).send({ error: 'calendar_token_exchange_failed' });
+    if (/refresh_token/.test(msg)) return reply.redirect(appDeepLink('calendar', 'error', 'refresh_token_missing'));
+    return reply.redirect(appDeepLink('calendar', 'error', 'token_exchange_failed'));
   }
 });
 
@@ -978,25 +998,29 @@ app.get('/v1/connections/drive/authorize', async (req, reply) => {
   }
 });
 
+// §38: Drive OAuth callback — every outcome redirects to the app via deep link.
 app.get('/v1/connections/drive/callback', async (req, reply) => {
-  const { code, state } = req.query as { code?: string; state?: string };
-  if (!code || !state) return reply.code(400).send({ error: 'missing_code_or_state' });
+  const { code, state, error } = req.query as { code?: string; state?: string; error?: string };
+  if (error) return reply.redirect(appDeepLink('drive', 'error', error));
+  if (!code || !state) return reply.redirect(appDeepLink('drive', 'error', 'missing_code_or_state'));
   const stateRow = await db.oAuthState.findUnique({ where: { state } });
-  if (!stateRow) return reply.code(400).send({ error: 'invalid_state' });
+  if (!stateRow || stateRow.provider !== 'drive') {
+    if (stateRow) await db.oAuthState.delete({ where: { state } }).catch(() => {});
+    return reply.redirect(appDeepLink('drive', 'error', 'invalid_state'));
+  }
   if (stateRow.expiresAt < new Date()) {
     await db.oAuthState.delete({ where: { state } });
-    return reply.code(400).send({ error: 'state_expired' });
+    return reply.redirect(appDeepLink('drive', 'error', 'state_expired'));
   }
   try {
     const tokens = await exchangeDriveCode(code, stateRow.codeVerifier);
     await storeDriveConnection(db, stateRow.userId, tokens);
     await db.oAuthState.delete({ where: { state } });
-    const deepLink = process.env.DEEP_LINK_SCHEME ?? 'nova';
-    return reply.redirect(`${deepLink}://connections/drive/connected`);
+    return reply.redirect(appDeepLink('drive', 'connected'));
   } catch (err) {
     req.log.error(err);
     await db.oAuthState.delete({ where: { state } }).catch(() => {});
-    return reply.code(500).send({ error: 'drive_token_exchange_failed' });
+    return reply.redirect(appDeepLink('drive', 'error', 'token_exchange_failed'));
   }
 });
 

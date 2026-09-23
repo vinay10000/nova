@@ -52,6 +52,7 @@ import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -686,7 +687,7 @@ private fun TypingIndicator(modifier: Modifier = Modifier) {
         initialValue = 0.25f,
         targetValue = 0.9f,
         animationSpec = infiniteRepeatable(
-          animation = tween(520, delayMillis = index * 170),
+          animation = tween(520, delayMillis = index * 170, easing = NovaMotion.Pulse),
           repeatMode = RepeatMode.Reverse,
         ),
         label = "dot$index",
@@ -948,7 +949,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             Row(
               Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(NovaRadius.md))
                 .background(if (selected) scheme.primaryContainer.copy(alpha = 0.72f) else Color.Transparent)
                 .clickable {
                   scope.launch {
@@ -1008,7 +1009,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             },
             enabled = !creatingChat,
             modifier = Modifier.weight(1f).heightIn(min = 52.dp),
-            shape = RoundedCornerShape(26.dp),
+            shape = CircleShape,
             colors = ButtonDefaults.buttonColors(
               containerColor = scheme.primary,
               contentColor = scheme.onPrimary,
@@ -1051,7 +1052,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
               ) {
                 listOf(8.dp, 13.dp, 9.dp).forEach { h ->
-                  Box(Modifier.width(2.5.dp).height(h).clip(RoundedCornerShape(2.dp)).background(scheme.onPrimary))
+                  Box(Modifier.width(2.5.dp).height(h).clip(RoundedCornerShape(NovaRadius.hair)).background(scheme.onPrimary))
                 }
               }
             }
@@ -1213,7 +1214,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               editText, { editText = it },
               modifier = Modifier.weight(1f),
               maxLines = 6,
-              shape = RoundedCornerShape(16.dp),
+              shape = RoundedCornerShape(NovaRadius.md),
               colors = OutlinedTextFieldDefaults.colors(
                 unfocusedContainerColor = scheme.surfaceVariant,
                 focusedContainerColor = scheme.surfaceVariant,
@@ -1225,7 +1226,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               ),
             )
             Spacer(Modifier.width(8.dp))
-            Button(onClick = { editIndex = null; vm.editAndResend(i, editText) }, shape = RoundedCornerShape(14.dp)) { Text("Send") }
+            Button(onClick = { editIndex = null; vm.editAndResend(i, editText) }, shape = CircleShape) { Text("Send") }
             TextButton(onClick = { editIndex = null }) { Text("Cancel", color = scheme.onSurfaceVariant) }
           }
         } else {
@@ -1249,11 +1250,11 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                         contentDescription = att.filename,
                         modifier = Modifier
                           .size(80.dp)
-                          .clip(RoundedCornerShape(8.dp)),
+                          .clip(RoundedCornerShape(NovaRadius.row)),
                       )
                     } else {
                       Surface(
-                        shape = RoundedCornerShape(10.dp),
+                        shape = RoundedCornerShape(NovaRadius.sm),
                         color = scheme.surfaceVariant,
                       ) {
                         Row(
@@ -1284,7 +1285,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               // User bubble: primaryContainer fill + onPrimaryContainer ink —
               // tonal accent, readable in both light and dark glass modes.
               Surface(
-                shape = RoundedCornerShape(22.dp),
+                shape = RoundedCornerShape(NovaRadius.bubble),
                 color = scheme.primaryContainer,
                 contentColor = scheme.onPrimaryContainer,
               ) {
@@ -1347,7 +1348,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             // Spec S13 live status: globe + #B3B3B3 15sp text while searching.
             currentStep?.let { step ->
               Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("🌐", fontSize = 20.sp)
+                Icon(
+                  Icons.Default.Public,
+                  contentDescription = null,
+                  tint = scheme.onSurfaceVariant,
+                  modifier = Modifier.size(20.dp),
+                )
                 Spacer(Modifier.width(8.dp))
                 Text(step, fontSize = 15.sp, color = scheme.onSurfaceVariant, modifier = Modifier.weight(1f))
               }
@@ -1360,7 +1366,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               var reasoningExpanded by remember { mutableStateOf(false) }
               Surface(
                 onClick = { reasoningExpanded = !reasoningExpanded },
-                shape = RoundedCornerShape(12.dp),
+                shape = RoundedCornerShape(NovaRadius.row),
                 color = novaGlassFill(),
                 modifier = Modifier.fillMaxWidth(),
               ) {
@@ -1408,7 +1414,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                 initialValue = 0.35f,
                 targetValue = 1f,
                 animationSpec = infiniteRepeatable(
-                  animation = tween(600, easing = FastOutSlowInEasing),
+                  animation = tween(600, easing = NovaMotion.Pulse),
                   repeatMode = RepeatMode.Reverse,
                 ),
                 label = "streamDotAlpha",
@@ -1438,7 +1444,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
         item {
           Surface(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(NovaRadius.md),
             color = novaGlassFill(),
             border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge()),
           ) {
@@ -1487,7 +1493,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               }
         pending.forEach { p ->
           Row(
-            Modifier.padding(end = 8.dp).clip(RoundedCornerShape(12.dp)).background(novaGlassFill())
+            Modifier.padding(end = 8.dp).clip(RoundedCornerShape(NovaRadius.row)).background(novaGlassFill())
               .clickable { vm.removeAttachment(p.id) }.padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
           ) {
@@ -1531,7 +1537,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           ) {
             mentionCandidates.forEach { p ->
               Surface(
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(NovaRadius.sm),
                 color = if (p.ready) scheme.secondary.copy(alpha = 0.14f) else novaGlassFill(),
                 modifier = Modifier.clickable {
                   val drop = (trailingMention?.length ?: 0) + 1
@@ -1575,7 +1581,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           // field so the glass panel behind shows through.
           Surface(
             modifier = Modifier.weight(1f),
-            shape = RoundedCornerShape(32.dp),
+            shape = CircleShape,
             color = Color.Transparent,
           ) {
             Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(start = 4.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1609,7 +1615,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                   )
                 },
                 maxLines = 5,
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(NovaRadius.lg),
                 // Sentence capitalisation: typing a prompt on a phone keyboard
                 // should not start with a shift press every time.
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
@@ -1761,7 +1767,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             placeholder = { Text("Brief me on Android news every morning") },
             modifier = Modifier.fillMaxWidth(),
             minLines = 2, maxLines = 4,
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(NovaRadius.md),
             colors = OutlinedTextFieldDefaults.colors(
               unfocusedContainerColor = novaGlassFill(), focusedContainerColor = novaGlassFill(),
               unfocusedTextColor = scheme.onSurface, focusedTextColor = scheme.onSurface,
@@ -1833,7 +1839,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                     }.onFailure { error = "Save failed. The draft named a tool that does not exist yet." }
                   }
                 }
-              }, shape = RoundedCornerShape(14.dp)) { Text("Keep this setup") }
+              }, shape = CircleShape) { Text("Keep this setup") }
             }
           }
         }
@@ -1841,7 +1847,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     }
     if (approvals.isNotEmpty()) {
       item {
-        Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), color = scheme.tertiary.copy(alpha = 0.16f)) {
+        Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(NovaRadius.lg), color = scheme.tertiary.copy(alpha = 0.16f)) {
           Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             NovaEyebrow("Approval needed")
             Spacer(Modifier.height(2.dp))
@@ -1949,7 +1955,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                     }
                       .onSuccess { e ->
                         runOutput = if (e != null) "[${e.status}] ${e.output ?: e.error ?: ""}"
-                          else "[RUNNING] Still running — track it in Activity."
+                          else "[RUNNING] Still running. Track it in Activity."
                       }
                       .onFailure { runOutput = "[failed] Background run failed to start." }
                     running = false; refresh()
@@ -2361,6 +2367,14 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   }
 }
 
+/** §38: map an OAuth deep-link error code to a line the user can act on. */
+private fun oauthErrorText(code: String): String = when (code) {
+  "access_denied" -> "Sign-in cancelled. Nothing was connected."
+  "state_expired" -> "Sign-in took too long. Please try again."
+  "invalid_state" -> "Sign-in session not recognised. Please try again."
+  else -> "Connection failed: ${code.replace('_', ' ')}. Please try again."
+}
+
 @Composable fun ConnectionsScreen(api: NovaApi, session: SessionToken, onBack: () -> Unit = {}) {
   val scope = rememberCoroutineScope()
   val context = LocalContext.current
@@ -2377,6 +2391,8 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   // F2 token-connect dialogs (Vercel/Supabase have no OAuth round-trip).
   var vercelDialog by remember { mutableStateOf(false) }
   var supabaseDialog by remember { mutableStateOf(false) }
+  // §38: one-shot failure code carried by the OAuth deep link return.
+  var oauthError by remember { mutableStateOf<String?>(null) }
 
   fun refresh() {
     scope.launch {
@@ -2402,6 +2418,16 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
   }
 
+  // Consume the OAuth deep-link error once; kept apart from `error` so a
+  // concurrent refresh() (which clears `error`) cannot wipe it.
+  val oauthNotice = OAuthDeepLink.notice.value
+  LaunchedEffect(oauthNotice) {
+    if (oauthNotice != null) {
+      OAuthDeepLink.notice.value = null
+      oauthError = oauthNotice
+    }
+  }
+
   LazyColumn(
     modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp),
     contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp + LocalBottomChrome.current),
@@ -2418,6 +2444,9 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     if (loading && providers.isEmpty()) { item { NovaSkeletonCards(rows = 5, height = 88.dp) } }
     error?.let { e ->
       item { Text(e, color = scheme.error, style = MaterialTheme.typography.bodyMedium) }
+    }
+    oauthError?.let { e ->
+      item { Text(oauthErrorText(e), color = scheme.error, style = MaterialTheme.typography.bodyMedium) }
     }
     items(providers.size) { i ->
       val p = providers[i]
@@ -2445,7 +2474,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               when {
                 connected && p.login != null -> "Connected as ${p.login}"
                 connected -> "Connected"
-                needsReconnect -> "Session expired — reconnect"
+                needsReconnect -> "Session expired. Reconnect"
                 p.state == "not_configured" -> "Not set up on the server yet"
                 p.state == "not_built" -> "Coming in a later phase"
                 else -> "Not connected"
@@ -2477,8 +2506,9 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             }
           } else if (needsReconnect || (p.state == "available" && p.id in setOf("github", "gmail", "calendar", "drive", "vercel", "supabase"))) {
             // §38: OAuth — redirect user to the provider to authorize.
-            // Backend callback redirects to nova://connections/{provider}/connected;
-            // ON_RESUME above refreshes state when the user returns.
+            // Backend callback redirects to nova://connections/{provider}/status;
+            // the manifest intent-filter + MainActivity deliver that deep link
+            // back here, and ON_RESUME refreshes state on return.
             // Vercel/Supabase are token-based: open a paste-a-key dialog instead.
             TextButton(
               enabled = !isConnecting,
@@ -2530,9 +2560,9 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           Column(modifier = Modifier.weight(1f)) {
             Text("LeetCode", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
             Spacer(Modifier.height(2.dp))
-            Text("Profiles, solved counts, contests, daily problem — use @leetcode in chat.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+            Text("Profiles, solved counts, contests, daily problem. Use @leetcode in chat.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
             Spacer(Modifier.height(2.dp))
-            Text("Built in — no connection needed", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.secondary)
+            Text("Built in, no connection needed", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.secondary)
           }
         }
       }
@@ -2554,7 +2584,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             Column {
               Text("Paste a Vercel token (Account Settings → Tokens). It is stored encrypted on the server.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
               Spacer(Modifier.height(10.dp))
-              OutlinedTextField(token, { token = it }, label = { Text("Token") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), colors = novaFieldColors())
+              OutlinedTextField(token, { token = it }, label = { Text("Token") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(NovaRadius.md), colors = novaFieldColors())
               formError?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
             }
           },
@@ -2587,9 +2617,9 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             Column {
               Text("Project ref plus a key (Project Settings → API). Stored encrypted on the server.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
               Spacer(Modifier.height(10.dp))
-              OutlinedTextField(ref, { ref = it }, label = { Text("Project ref") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), colors = novaFieldColors())
+              OutlinedTextField(ref, { ref = it }, label = { Text("Project ref") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(NovaRadius.md), colors = novaFieldColors())
               Spacer(Modifier.height(8.dp))
-              OutlinedTextField(key, { key = it }, label = { Text("Key") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), colors = novaFieldColors())
+              OutlinedTextField(key, { key = it }, label = { Text("Key") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(NovaRadius.md), colors = novaFieldColors())
               formError?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
             }
           },
@@ -2796,7 +2826,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
       )
       Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
-          "Accent color — ${currentAccent.label}",
+          "Accent color: ${currentAccent.label}",
           fontSize = 15.sp,
           color = scheme.onSurfaceVariant,
           modifier = Modifier.padding(top = 8.dp),
@@ -2828,7 +2858,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     item {
       SpecSettingsRow(
         label = "Nova",
-        subtitle = "v0.1.0 — voice, agents and ties into the tools you already use.",
+        subtitle = "v0.1.0. Voice, agents and ties into the tools you already use.",
       )
     }
 
