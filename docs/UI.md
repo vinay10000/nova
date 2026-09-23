@@ -49,6 +49,30 @@ All screens draw from shared tokens and components instead of hard-coded colors 
 
 All list screens (Agents, Activity, All Chats, Connections) show shimmer skeletons during first load and structured `NovaEmptyState` copy when empty — no more bare `LinearProgressIndicator` bars or silent blank areas.
 
+## Generative UI (§45, `GenerativeUi.kt` + `backend/src/ui/UiBlocks.ts`)
+
+Ten validated block types render under assistant replies (streamed as `ui` SSE
+chunks, persisted in message `metadata.ui`, restored from history):
+
+| Type | Shape |
+|---|---|
+| `summary` | prose + mono key/value fact rows |
+| `metrics` | big numbers + signed mono deltas (≤3 on one grid) |
+| `list` | mono indices, hairline rhythm, right datum |
+| `table` | fixed mono header, measured columns, zebra, scrolls under 360dp |
+| `progress` | percent bars — track always visible, fill animates width |
+| `timeline` | status dots (done/active/todo/error) on a rounded rail |
+| `comparison` | two labeled columns on one shared row grid; tonal winner mark |
+| `code` | inset mono well, both-axis scroll, language in header meta |
+| `chart` | Canvas bar series with measured scale + mono category labels |
+| `links` | tappable source rows (http/https only) with domain meta |
+
+Fixes baked in: server-assigned ids (model ids can't collide/drop cards),
+nonce per tool-result block, table rows padded/truncated to header width,
+blank metric values rejected, copy action attached server-side, content
+visible by default (user collapse only), `filter` no longer mis-wired to
+expand, link URLs must be http(s).
+
 ## Solid surface system (was: glassmorphism / Haze)
 
 - **Decision** — Haze was removed. On the emulator (and anywhere the blur

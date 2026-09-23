@@ -566,8 +566,9 @@ fun MarkdownBody(content: String, streaming: Boolean) {
   )
 }
 
-// §45 generative UI lives in GenerativeUi.kt — typed cards (summary, metrics,
-// list, table) with explicit theme-token contrast for dark and light panels.
+// §45 generative UI lives in GenerativeUi.kt — ten typed cards (summary,
+// metrics, list, table, progress, timeline, comparison, code, chart, links),
+// each with explicit theme-token contrast for dark and light panels.
 
 @Composable
 private fun BareAction(

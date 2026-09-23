@@ -275,6 +275,19 @@ interface NovaApi {
 @Serializable data class UiActionDto(val type: String, val label: String, val value: String? = null)
 @Serializable data class UiItemDto(val label: String, val secondary: String? = null, val value: String? = null)
 @Serializable data class UiMetricDto(val label: String, val value: String, val change: String? = null)
+/** progress: value is percent; the renderer treats every value ≤1 in a block as a 0–1 fraction. */
+@Serializable data class UiProgressItemDto(val label: String, val value: Float = 0f, val detail: String? = null)
+@Serializable data class UiStepDto(val label: String, val status: String = "todo", val detail: String? = null, val value: String? = null)
+@Serializable data class UiCompareRowDto(val label: String, val left: String = "", val right: String = "")
+@Serializable data class UiCompareDto(
+  val leftLabel: String = "",
+  val rightLabel: String = "",
+  val rows: List<UiCompareRowDto> = emptyList(),
+  val winner: String? = null,
+)
+@Serializable data class UiChartPointDto(val label: String, val value: Float = 0f)
+@Serializable data class UiChartDto(val points: List<UiChartPointDto> = emptyList(), val unit: String? = null)
+@Serializable data class UiLinkDto(val title: String, val url: String, val secondary: String? = null)
 /** Flat DTO keeps unknown future block types decodable; the renderer ignores them safely. */
 @Serializable data class UiBlockDto(
   val type: String,
@@ -287,6 +300,13 @@ interface NovaApi {
   val columns: List<String> = emptyList(),
   val rows: List<List<String>> = emptyList(),
   val actions: List<UiActionDto> = emptyList(),
+  val progress: List<UiProgressItemDto> = emptyList(),
+  val steps: List<UiStepDto> = emptyList(),
+  val compare: UiCompareDto? = null,
+  val code: String? = null,
+  val language: String? = null,
+  val chart: UiChartDto? = null,
+  val links: List<UiLinkDto> = emptyList(),
 )
 
 // §52 agent DTOs. Build returns either a config or {questions[]} — kept as
