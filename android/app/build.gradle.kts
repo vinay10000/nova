@@ -41,6 +41,8 @@ android {
       signingConfig = signingConfigs.getByName("preview")
     }
     debug {
+      // Emulator reaches the host machine via 10.0.2.2 — exercise local §45 cards.
+      buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:3000\"")
       signingConfig = signingConfigs.getByName("sandboxDebug")
     }
   }
