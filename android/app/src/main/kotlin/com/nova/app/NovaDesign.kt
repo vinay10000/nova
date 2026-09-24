@@ -294,6 +294,9 @@ private val accentMap = mapOf(
   ),
 )
 
+/** Swatch for accent pickers — same hue as the scheme's dark-mode primary. */
+fun novaAccentSwatch(accent: NovaAccent): Color = accentMap.getValue(accent).darkPrimary
+
 private fun buildNovaScheme(accent: NovaAccent, dark: Boolean): ColorScheme {
   val a = accentMap[accent]!!
 

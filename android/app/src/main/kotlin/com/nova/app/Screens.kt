@@ -40,6 +40,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
@@ -1522,11 +1524,14 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     }
 
     // Composer: solid spec pill (#202020) floating over the thread — opaque
-    // so message text can never read through it.
+    // so message text can never read through it. Height animates as the
+    // field grows (ChatGPT-mobile style): list padding tracks overlayDp via
+    // onGloballyPositioned above, so messages stay clear of the taller box.
     GlassPanel(
       modifier = Modifier
         .fillMaxWidth()
-        .padding(horizontal = 8.dp, vertical = 8.dp),
+        .padding(horizontal = 8.dp, vertical = 8.dp)
+        .animateContentSize(animationSpec = tween(NovaMotion.Standard, easing = NovaMotion.Ease)),
       corner = RoundedCornerShape(NovaRadius.xl),
     ) {
       Column {
@@ -1577,26 +1582,35 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
           verticalAlignment = Alignment.Bottom,
         ) {
-          // Composer pill: + · placeholder · mic · accent action. Transparent
-          // field so the glass panel behind shows through.
+          // Composer row: + · field · mic · accent action. Transparent field
+          // so the glass panel shows through. Constant corner radius (not
+          // CircleShape) so a multi-line box keeps its shape instead of the
+          // radius scaling with height and clipping the first line. Controls
+          // sit on the bottom edge so the field grows upward past them.
           Surface(
             modifier = Modifier.weight(1f),
-            shape = CircleShape,
+            shape = RoundedCornerShape(NovaRadius.xl),
             color = Color.Transparent,
           ) {
-            Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(start = 4.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(start = 4.dp, end = 6.dp), verticalAlignment = Alignment.Bottom) {
               Box {
                 IconButton(onClick = { showAttachMenu = true }, enabled = !uploading && !streaming, modifier = Modifier.size(48.dp)) {
                   Icon(Icons.Default.Add, contentDescription = "Attach", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
                 }
               }
-              if (micGranted && voice.available) {
-                IconButton(onClick = { voice.start() }, modifier = Modifier.size(48.dp)) {
-                  Icon(Icons.Default.Mic, contentDescription = "Voice input", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
-                }
-              } else {
-                IconButton(onClick = { micPermission.launch(Manifest.permission.RECORD_AUDIO) }, modifier = Modifier.size(48.dp)) {
-                  Icon(Icons.Default.Mic, contentDescription = "Enable voice input", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
+              // ChatGPT-style: voice affordance only while the field is empty.
+              // Once there is text the accent action is send; a second mic
+              // next to it is noise (and voice lands its full transcript at
+              // once, so nothing is mid-utterance while typing).
+              if (input.isBlank()) {
+                if (micGranted && voice.available) {
+                  IconButton(onClick = { voice.start() }, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Default.Mic, contentDescription = "Voice input", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
+                  }
+                } else {
+                  IconButton(onClick = { micPermission.launch(Manifest.permission.RECORD_AUDIO) }, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Default.Mic, contentDescription = "Enable voice input", tint = scheme.onSurface, modifier = Modifier.size(24.dp))
+                  }
                 }
               }
               val primaryColor = scheme.primary
@@ -1614,7 +1628,11 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                     color = scheme.onSurfaceVariant,
                   )
                 },
-                maxLines = 5,
+                // Grows one line at a time; past six the field scrolls inside
+                // itself (platform behaviour) instead of pushing the thread
+                // off screen.
+                minLines = 1,
+                maxLines = 6,
                 shape = RoundedCornerShape(NovaRadius.lg),
                 // Sentence capitalisation: typing a prompt on a phone keyboard
                 // should not start with a shift press every time.
@@ -2781,74 +2799,106 @@ private fun oauthErrorText(code: String): String = when (code) {
     item { SpecSectionLabel("Appearance", modifier = Modifier.padding(top = 8.dp)) }
 
     item {
-      // Spec S27 theme picker: System (Default) · Light · Dark rows.
+      // One Theme row, one picker — same pattern as every other setting
+      // (row + trailing affordance → menu). Was three rows all labelled
+      // "Appearance", which read as a broken duplicate list.
       val currentMode = NovaThemeMode.entries.find {
         it.name.equals(AccentPreferences.getThemeMode(context), ignoreCase = true)
       } ?: NovaThemeMode.SYSTEM
-      Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        listOf(
-          NovaThemeMode.SYSTEM to "System (Default)",
-          NovaThemeMode.LIGHT to "Light",
-          NovaThemeMode.DARK to "Dark",
-        ).forEach { (mode, label) ->
-          SpecSettingsRow(
-            label = "Appearance",
-            subtitle = label,
-            onClick = {
-              AccentPreferences.setThemeMode(context, mode.name)
-              onPreferencesChanged()
-            },
-            leading = {
-              Icon(Icons.Default.Settings, contentDescription = null, tint = scheme.onSurface, modifier = Modifier.size(24.dp))
-            },
-            trailing = {
-              if (mode == currentMode) {
-                Icon(Icons.Default.Check, contentDescription = "Selected", tint = scheme.primary, modifier = Modifier.size(20.dp))
-              }
-            },
-          )
+      val modeLabels = listOf(
+        NovaThemeMode.SYSTEM to "System (Default)",
+        NovaThemeMode.LIGHT to "Light",
+        NovaThemeMode.DARK to "Dark",
+      )
+      var themeMenu by remember { mutableStateOf(false) }
+      Box {
+        SpecSettingsRow(
+          label = "Theme",
+          subtitle = modeLabels.first { it.first == currentMode }.second,
+          onClick = { themeMenu = true },
+          leading = {
+            Icon(Icons.Default.DarkMode, contentDescription = null, tint = scheme.onSurface, modifier = Modifier.size(24.dp))
+          },
+          trailing = {
+            Icon(
+              Icons.AutoMirrored.Filled.KeyboardArrowRight,
+              contentDescription = null,
+              tint = scheme.onSurfaceVariant,
+              modifier = Modifier.size(20.dp),
+            )
+          },
+        )
+        DropdownMenu(expanded = themeMenu, onDismissRequest = { themeMenu = false }, containerColor = novaGlassFill()) {
+          modeLabels.forEach { (mode, label) ->
+            DropdownMenuItem(
+              text = { Text(label, color = if (mode == currentMode) scheme.primary else scheme.onSurface) },
+              trailingIcon = {
+                if (mode == currentMode) {
+                  Icon(Icons.Default.Check, contentDescription = "Selected", tint = scheme.primary, modifier = Modifier.size(20.dp))
+                }
+              },
+              onClick = {
+                themeMenu = false
+                AccentPreferences.setThemeMode(context, mode.name)
+                onPreferencesChanged()
+              },
+            )
+          }
         }
       }
     }
 
     item {
-      // Spec S28 accent picker: 16px dot + 15px label rows, check on the active.
+      // Accent: one row showing the live swatch + name, same menu pattern.
       val currentAccentName = AccentPreferences.get(context)
       val currentAccent = NovaAccent.entries.find { it.name.equals(currentAccentName, ignoreCase = true) } ?: NovaAccent.PURPLE
-      val dotColors = mapOf(
-        NovaAccent.BLUE to Color(0xFF6B9BF5),
-        NovaAccent.WHITE to Color(0xFFF0F0F0),
-        NovaAccent.GREEN to Color(0xFF6FCF97),
-        NovaAccent.YELLOW to Color(0xFFE3C568),
-        NovaAccent.PINK to Color(0xFFF08BB8),
-        NovaAccent.ORANGE to Color(0xFFF09A5C),
-        NovaAccent.PURPLE to Color(0xFFA270F0),
-      )
-      Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-          "Accent color: ${currentAccent.label}",
-          fontSize = 15.sp,
-          color = scheme.onSurfaceVariant,
-          modifier = Modifier.padding(top = 8.dp),
+      var accentMenu by remember { mutableStateOf(false) }
+      Box {
+        SpecSettingsRow(
+          label = "Accent color",
+          subtitle = currentAccent.label,
+          onClick = { accentMenu = true },
+          leading = {
+            Box(
+              Modifier.size(16.dp).clip(CircleShape).background(novaAccentSwatch(currentAccent)),
+            )
+          },
+          trailing = {
+            Icon(
+              Icons.AutoMirrored.Filled.KeyboardArrowRight,
+              contentDescription = null,
+              tint = scheme.onSurfaceVariant,
+              modifier = Modifier.size(20.dp),
+            )
+          },
         )
-        NovaAccent.entries.forEach { accent ->
-          SpecSettingsRow(
-            label = accent.label,
-            onClick = {
-              AccentPreferences.set(context, accent.name)
-              onPreferencesChanged()
-            },
-            leading = {
-              Box(
-                Modifier.size(16.dp).clip(CircleShape).background(dotColors[accent] ?: Color.White),
-              )
-            },
-            trailing = {
-              if (accent == currentAccent) {
-                Icon(Icons.Default.Check, contentDescription = "Selected", tint = scheme.primary, modifier = Modifier.size(20.dp))
-              }
-            },
-          )
+        DropdownMenu(expanded = accentMenu, onDismissRequest = { accentMenu = false }, containerColor = novaGlassFill()) {
+          NovaAccent.entries.forEach { accent ->
+            DropdownMenuItem(
+              text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                  Box(
+                    Modifier.size(16.dp).clip(CircleShape).background(novaAccentSwatch(accent)),
+                  )
+                  Spacer(Modifier.width(10.dp))
+                  Text(
+                    accent.label,
+                    color = if (accent == currentAccent) scheme.primary else scheme.onSurface,
+                  )
+                }
+              },
+              trailingIcon = {
+                if (accent == currentAccent) {
+                  Icon(Icons.Default.Check, contentDescription = "Selected", tint = scheme.primary, modifier = Modifier.size(20.dp))
+                }
+              },
+              onClick = {
+                accentMenu = false
+                AccentPreferences.set(context, accent.name)
+                onPreferencesChanged()
+              },
+            )
+          }
         }
       }
     }
