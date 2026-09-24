@@ -79,8 +79,8 @@ paths:
   /v1/agents:
     get: { summary: List agents (§13), responses: { '200': { description: ok } } }
     post:
-      summary: Create agent config draft (§13 — review before activate; unknown tool id = 400)
-      responses: { '200': { description: ok }, '400': { description: invalid_input|unknown_tool } }
+      summary: Create and return the full agent config draft (§13 — review before activate; unknown tool id = 400)
+      responses: { '200': { description: full agent draft }, '400': { description: invalid_input|unknown_tool } }
   /v1/agents/build:
     post:
       summary: NL builder (§12/§59) — prompt -> agent config or {questions[]}
@@ -108,8 +108,8 @@ paths:
     get: { summary: Pending checkpoints (§36, ?status=), responses: { '200': { description: ok } } }
   /v1/approvals/{id}:
     post:
-      summary: Approve/Reject human checkpoint (§36; resume-on-decision is Phase 5)
-      responses: { '200': { description: ok } }
+      summary: Approve/Reject human checkpoint (§36; rejection cancels the waiting execution, approval resumes when a worker is available)
+      responses: { '200': { description: decision recorded }, '400': { description: invalid_input }, '404': { description: not_found } }
   /v1/connections:
     get: { summary: OAuth connections (§38), responses: { '200': { description: ok } } }
   /v1/connections/github/authorize:

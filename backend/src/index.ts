@@ -489,7 +489,6 @@ app.post('/v1/agents', async (req, reply) => {
   const { schedule, ...rest } = parsed.data;
   return db.agent.create({
     data: { userId, ...rest, schedule: schedule ?? undefined, permissions, status: 'draft' },
-    select: { id: true, name: true, status: true },
   });
 });
 
@@ -633,11 +632,21 @@ app.post('/v1/approvals/:id', async (req, reply) => {
   const { id } = req.params as { id: string };
   const body = z.object({ decision: z.enum(['approve', 'reject']) }).safeParse(req.body);
   if (!body.success) return reply.code(400).send({ error: 'invalid_input' });
-  const { count } = await db.approval.updateMany({
+  const approval = await db.approval.findFirst({
     where: { id, userId, status: 'pending' },
+    select: { executionId: true },
+  });
+  if (!approval) return reply.code(404).send({ error: 'not_found' });
+  await db.approval.update({
+    where: { id },
     data: { status: body.data.decision === 'approve' ? 'approved' : 'rejected', decidedAt: new Date() },
   });
-  if (!count) return reply.code(404).send({ error: 'not_found' });
+  if (body.data.decision === 'reject') {
+    await db.execution.updateMany({
+      where: { id: approval.executionId, userId, status: { in: ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL'] } },
+      data: { status: 'CANCELLED', completedAt: new Date(), error: 'approval_rejected' },
+    });
+  }
   return { ok: true, resumed: false };
 });
 

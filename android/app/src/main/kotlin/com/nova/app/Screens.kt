@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -71,6 +72,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -91,17 +93,24 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.layout.Arrangement
 import androidx.lifecycle.ViewModel
@@ -130,6 +139,8 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -708,7 +719,7 @@ private fun TypingIndicator(modifier: Modifier = Modifier) {
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit = {}, onConnectionsClick: () -> Unit = {}, onAgentsClick: () -> Unit = {}, onActivityClick: () -> Unit = {}, onAllChatsClick: () -> Unit = {}, vm: ChatViewModel = viewModel()) {
+fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit = {}, onConnectionsClick: () -> Unit = {}, onAgentsClick: (String?) -> Unit = {}, onActivityClick: () -> Unit = {}, onAllChatsClick: () -> Unit = {}, vm: ChatViewModel = viewModel()) {
   LaunchedEffect(session) { vm.configureSession(session) }
   LaunchedEffect(api) { vm.configureApi(api) }
   var conversations by remember { mutableStateOf<List<ConversationDto>>(emptyList()) }
@@ -852,6 +863,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   // bottom. Pull away to read back and the view stays put; a "Latest" pill
   // offers the way down. A queued animateScrollToItem per token fought the
   // finger and janked, so this jumps instead of animating.
+  val lastUserRequest = messages.lastOrNull { it.role == "user" }?.content?.takeIf { it.isNotBlank() }
   val atBottom by remember {
     derivedStateOf {
       val info = listState.layoutInfo
@@ -929,7 +941,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           Spacer(Modifier.height(8.dp))
           DrawerMenuRow(Icons.Default.PhotoLibrary, "Images") { scope.launch { drawerState.close() }; pickImage.launch("image/*") }
           DrawerMenuRow(Icons.AutoMirrored.Filled.MenuBook, "Library") { scope.launch { drawerState.close() }; onAllChatsClick() }
-          DrawerMenuRow(Icons.Default.Folder, "Projects") { scope.launch { drawerState.close() }; onAgentsClick() }
+          DrawerMenuRow(Icons.Default.Folder, "Projects") { scope.launch { drawerState.close() }; onAgentsClick(null) }
           DrawerMenuRow(Icons.Default.Schedule, "Scheduled") { scope.launch { drawerState.close() }; onActivityClick() }
           DrawerMenuRow(Icons.Default.AlternateEmail, "Plugins") { scope.launch { drawerState.close() }; onConnectionsClick() }
         }
@@ -1110,11 +1122,22 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                   )
                 }
               }
-              DropdownMenuItem(
-                text = { Text("Search chats") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                onClick = { topMenu = false; onAllChatsClick() },
-              )
+               DropdownMenuItem(
+                 text = { Text("Search chats") },
+                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                 onClick = { topMenu = false; onAllChatsClick() },
+               )
+               if (lastUserRequest != null) {
+                 DropdownMenuItem(
+                   text = { Text("Turn this into an agent") },
+                   leadingIcon = { Icon(Icons.Default.AccountTree, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                   onClick = {
+                     topMenu = false
+                     onAgentsClick("Create an agent based on this request: $lastUserRequest")
+                   },
+                 )
+               }
+
             }
           }
         }
@@ -1733,278 +1756,722 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
 }
 }
 
-@Composable fun AgentsScreen(api: NovaApi, onBack: (() -> Unit)? = null) {
+@Composable fun AgentsScreen(
+  api: NovaApi,
+  onBack: (() -> Unit)? = null,
+  initialPrompt: String? = null,
+  onPromptConsumed: () -> Unit = {},
+) {
+  val viewModel: AgentsViewModel = viewModel()
+  val state by viewModel.state.collectAsState()
+  val listState = rememberLazyListState()
   val scope = rememberCoroutineScope()
-  var agents by remember { mutableStateOf<List<com.nova.app.data.AgentDto>>(emptyList()) }
-  var loading by remember { mutableStateOf(true) }
-  var error by remember { mutableStateOf<String?>(null) }
-  var nl by remember { mutableStateOf("") }
-  var building by remember { mutableStateOf(false) }
-  var built by remember { mutableStateOf<kotlinx.serialization.json.JsonObject?>(null) }
-  var selected by remember { mutableStateOf<com.nova.app.data.AgentDto?>(null) }
-  var runOutput by remember { mutableStateOf<String?>(null) }
-  var running by remember { mutableStateOf(false) }
-  var approvals by remember { mutableStateOf<List<com.nova.app.data.ApprovalDto>>(emptyList()) }
+  var filter by rememberSaveable { mutableStateOf("All") }
   val scheme = MaterialTheme.colorScheme
 
-  fun refresh() {
-    scope.launch {
-      loading = true; error = null
-      runCatching { api.agents() to api.approvals() }
-        .onSuccess { (a, ap) -> agents = a.agents; approvals = ap.approvals }
-        .onFailure { error = "Unable to load agents" }
-      loading = false
+  LaunchedEffect(api) { viewModel.configureApi(api) }
+  LaunchedEffect(initialPrompt) {
+    if (!initialPrompt.isNullOrBlank()) {
+      viewModel.setPrompt(initialPrompt)
+      onPromptConsumed()
     }
   }
-  LaunchedEffect(Unit) { refresh() }
-  val live = agents.count { it.status == "active" }
+
+  val liveCount = state.agents.count { it.status.equals("active", true) }
+  val filteredAgents = remember(state.agents, filter) {
+    when (filter) {
+      "Live" -> state.agents.filter { it.status.equals("active", true) }
+      "Drafts" -> state.agents.filter { it.status.equals("draft", true) }
+      "Paused" -> state.agents.filter { it.status.equals("paused", true) }
+      else -> state.agents
+    }
+  }
 
   LazyColumn(
-    Modifier.fillMaxSize().padding(horizontal = 20.dp),
-    contentPadding = PaddingValues(top = 24.dp, bottom = 28.dp + LocalBottomChrome.current),
-    verticalArrangement = Arrangement.spacedBy(14.dp),
+    state = listState,
+    modifier = Modifier.fillMaxSize().padding(horizontal = ScreenGutter),
+    contentPadding = PaddingValues(top = NovaSpace.xl, bottom = NovaSpace.xxl + LocalBottomChrome.current),
+    verticalArrangement = Arrangement.spacedBy(NovaSpace.lg),
   ) {
     item {
       NovaPageHeader(
-        eyebrow = "$live live",
-        title = "Agents at work.",
-        subtitle = "Say what should happen on its own. Nova asks what is missing, then hands you the plan to keep.",
+        eyebrow = if (liveCount == 0) "Your workspace" else "$liveCount live",
+        title = "Agents",
+        subtitle = "Tell Nova what should happen. Review the tools and timing before anything runs.",
         onBack = onBack,
+        trailing = {
+          NovaIconAction(Icons.Default.Add, "Draft an agent") {
+            viewModel.setPrompt("")
+            scope.launch { listState.animateScrollToItem(if (state.notice != null) 2 else 1) }
+          }
+        },
       )
     }
-    // Builder island: the one composed object on this screen.
-    item {
-      GlassPanel(corner = RoundedCornerShape(NovaRadius.xl)) {
-        Column(Modifier.padding(20.dp)) {
-          Text("Describe the job", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
-          Spacer(Modifier.height(4.dp))
-          Text("One sentence is enough. Amend after Nova drafts it.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-          Spacer(Modifier.height(12.dp))
-          OutlinedTextField(
-            nl, { nl = it },
-            placeholder = { Text("Brief me on Android news every morning") },
-            modifier = Modifier.fillMaxWidth(),
-            minLines = 2, maxLines = 4,
-            shape = RoundedCornerShape(NovaRadius.md),
-            colors = OutlinedTextFieldDefaults.colors(
-              unfocusedContainerColor = novaGlassFill(), focusedContainerColor = novaGlassFill(),
-              unfocusedTextColor = scheme.onSurface, focusedTextColor = scheme.onSurface,
-              cursorColor = scheme.primary, unfocusedBorderColor = scheme.outlineVariant, focusedBorderColor = scheme.primary,
-            ),
-          )
-          Spacer(Modifier.height(12.dp))
-          NovaButton(
-            text = "Draft the agent",
-            onClick = {
-              scope.launch {
-                building = true; error = null; built = null
-                runCatching { api.buildAgent(com.nova.app.data.BuildAgentRequest(nl)) }
-                  .onSuccess { built = it }
-                  .onFailure { error = "Builder failed. Check connection and retry." }
-                building = false
-              }
-            },
-            enabled = nl.isNotBlank(),
-            loading = building,
-            modifier = Modifier.fillMaxWidth(),
-          )
-        }
-      }
-    }
-    built?.let { obj ->
+
+    state.notice?.let { notice ->
       item {
-        val questions = obj["questions"]?.let { runCatching { it.jsonArray.map { q -> q.jsonPrimitive.content } }.getOrNull() }
-        GlassPanel(Modifier.fillMaxWidth(), corner = RoundedCornerShape(NovaRadius.lg)) {
-          Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (questions != null) {
-              Text("Two things first", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
-              questions.forEachIndexed { i, q ->
-                Text("${i + 1}.  $q", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
-              }
-              Text("Answer in the box above and draft again.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-            } else {
-              Text(obj["name"]?.jsonPrimitive?.contentOrNull ?: "New agent", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
-              Text(obj["goal"]?.jsonPrimitive?.contentOrNull ?: "", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
-              Text(
-                (obj["tools"]?.jsonArray?.map { it.jsonPrimitive.content }?.joinToString("  ·  ") ?: "none"),
-                fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.primary,
-              )
-              Spacer(Modifier.height(4.dp))
-              Button(onClick = {
-                scope.launch {
-                  error = null
-                  // F5: never force-unwrap model output — a malformed draft shows
-                  // an error, not a crash.
-                  val name = obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                  val goal = obj["goal"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                  val tools = runCatching { obj["tools"]?.jsonArray?.map { it.jsonPrimitive.content } }.getOrNull()?.filter { it.isNotBlank() }
-                  if (name == null || goal == null || tools.isNullOrEmpty()) {
-                    error = "That draft is incomplete. Describe the job with a little more detail and draft again."
-                  } else {
-                    runCatching {
-                      api.createAgent(
-                        com.nova.app.data.CreateAgentRequest(
-                          name = name,
-                          goal = goal,
-                          instructions = obj["instructions"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: goal,
-                          tools = tools,
-                        ),
-                      )
-                    }.onSuccess { created ->
-                      built = null; nl = ""
-                      runCatching { api.activateAgent(created.id) }
-                      refresh()
-                    }.onFailure { error = "Save failed. The draft named a tool that does not exist yet." }
-                  }
-                }
-              }, shape = CircleShape) { Text("Keep this setup") }
-            }
-          }
-        }
-      }
-    }
-    if (approvals.isNotEmpty()) {
-      item {
-        Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(NovaRadius.lg), color = scheme.tertiary.copy(alpha = 0.16f)) {
-          Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            NovaEyebrow("Approval needed")
-            Spacer(Modifier.height(2.dp))
-            Text("Needs your call", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
-            Text("${approvals.size} ${if (approvals.size == 1) "action" else "actions"} waiting", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
-            approvals.forEach { ap ->
-              NovaApprovalRow(
-                toolId = ap.toolId,
-                onAllow = {
-                  scope.launch {
-                    runCatching { api.decideApproval(ap.id, com.nova.app.data.DecideApprovalRequest("approve")) }
-                    refresh()
-                  }
-                },
-                onDismiss = {
-                  scope.launch {
-                    runCatching { api.decideApproval(ap.id, com.nova.app.data.DecideApprovalRequest("reject")) }
-                    refresh()
-                  }
-                },
-              )
-            }
-          }
-        }
-      }
-    }
-    // Skeleton rows instead of a hairline progress bar: the list keeps its
-    // shape, so arriving agents do not shove the builder card around.
-    if (loading && agents.isEmpty()) { item { NovaSkeletonCards(rows = 3, height = 84.dp) } }
-    error?.let { e ->
-      item {
-        Surface(shape = RoundedCornerShape(NovaRadius.md), color = scheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
-          Row(Modifier.padding(horizontal = NovaSpace.lg, vertical = NovaSpace.md), verticalAlignment = Alignment.CenterVertically) {
-            Text(e, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = scheme.onSurface)
-            TextButton(onClick = { refresh() }) { Text("Retry", color = scheme.primary) }
-          }
-        }
-      }
-    }
-    if (!loading && agents.isEmpty() && error == null) {
-      item {
-        NovaEmptyState(
-          glyph = "◎",
-          title = "No agents yet.",
-          body = "The first one takes about a minute: describe it above.",
+        AgentsNotice(
+          message = notice,
+          onDismiss = viewModel::clearNotice,
         )
       }
     }
-    items(agents.size) { i ->
-      val a = agents[i]
-      val open = selected?.id == a.id
-      NovaCard(
-        onClick = {
-          selected = if (open) null else a; runOutput = null
-          scope.launch { runCatching { api.agent(a.id) }.onSuccess { selected = it } }
-        },
-        showChevron = !open,
+
+    item {
+      AgentsBuilder(
+        prompt = state.builderPrompt,
+        questions = state.builderQuestions,
+        error = state.builderError,
+        isBuilding = state.isBuilding,
+        onPromptChange = viewModel::setPrompt,
+        onBuild = viewModel::buildAgent,
+        onClear = viewModel::clearBuilder,
+      )
+    }
+
+    state.draft?.let { draft ->
+      item {
+        AgentReviewCard(
+          draft = draft,
+          isSaving = state.isSaving,
+          error = state.builderError,
+          onEdit = { viewModel.openEditor() },
+          onSaveDraft = { viewModel.saveDraft(false) },
+          onActivate = { viewModel.saveDraft(true) },
+          onDiscard = viewModel::clearBuilder,
+        )
+      }
+    }
+
+    if (state.approvals.isNotEmpty()) {
+      item {
+        AgentsApprovalPanel(
+          approvals = state.approvals,
+          busyId = state.approvalBusyId,
+          onDecision = viewModel::decideApproval,
+        )
+      }
+    }
+
+    item {
+      Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
       ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Text(a.name, Modifier.weight(1f), fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
-          NovaStatusPill(
-            text = when (a.status) { "active" -> "Live"; "paused" -> "Paused"; else -> "Draft" },
-            tone = novaStatusTone(a.status),
+        Column(Modifier.weight(1f)) {
+          Text("Your agents", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleLarge, color = scheme.onSurface)
+          Text(
+            if (state.agents.isEmpty()) "Start with one useful job." else "${state.agents.size} configured",
+            style = MaterialTheme.typography.bodySmall,
+            color = scheme.onSurfaceVariant,
           )
         }
-        Spacer(Modifier.height(4.dp))
-        Text(a.tools.joinToString("  ·  "), fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant, maxLines = 2)
-        if (open) {
-          Spacer(Modifier.height(10.dp))
-          selected?.let { d ->
-            Text(d.goal, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
-            Spacer(Modifier.height(14.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              NovaButton(
-                text = if (running) "Running…" else "Run now",
-                onClick = {
-                  scope.launch {
-                    running = true; runOutput = null
-                    runCatching { api.runAgent(d.id) }
-                      .onSuccess { runOutput = "[${it.status}] ${it.output ?: ""}" }
-                      .onFailure { runOutput = "[failed] Run failed. Retry shortly." }
-                    running = false; refresh()
-                  }
-                },
-                enabled = !running,
-                loading = running,
-              )
-              Spacer(Modifier.width(NovaSpace.xs))
-              // §56 background=true: server keeps running after the response; poll the
-              // execution row until it reaches a terminal status (10 min budget).
-              TextButton(
-                onClick = {
-                  scope.launch {
-                    running = true; runOutput = null
-                    runCatching {
-                      val started = api.runAgent(d.id, com.nova.app.data.RunAgentRequest(background = true))
-                      runOutput = "[${started.status}] Running in background…"
-                      var final: com.nova.app.data.ExecutionDto? = null
-                      for (i in 0 until 120) {
-                        delay(5000)
-                        val e = runCatching { api.execution(started.executionId) }.getOrNull() ?: continue
-                        if (e.status !in setOf("QUEUED", "RUNNING")) { final = e; break }
-                      }
-                      final
-                    }
-                      .onSuccess { e ->
-                        runOutput = if (e != null) "[${e.status}] ${e.output ?: e.error ?: ""}"
-                          else "[RUNNING] Still running. Track it in Activity."
-                      }
-                      .onFailure { runOutput = "[failed] Background run failed to start." }
-                    running = false; refresh()
-                  }
-                },
-                enabled = !running,
-              ) { Text("In background", color = scheme.primary) }
-              if (d.status != "active") TextButton(onClick = {
-                scope.launch { runCatching { api.activateAgent(d.id) }; refresh() }
-              }) { Text("Activate", color = scheme.primary) }
-              if (d.status == "active") TextButton(onClick = {
-                scope.launch { runCatching { api.pauseAgent(d.id) }; refresh() }
-              }) { Text("Pause", color = scheme.onSurfaceVariant) }
-            }
-            runOutput?.let {
-              Spacer(Modifier.height(NovaSpace.md))
-              Surface(shape = RoundedCornerShape(NovaRadius.sm), color = novaGlassFill(), border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge())) {
-                Text(
-                  it,
-                  fontFamily = NovaMono,
-                  style = MaterialTheme.typography.labelSmall,
-                  color = scheme.onSurface,
-                  modifier = Modifier.padding(NovaSpace.md),
-                )
-              }
-            }
-          }
+        if (state.isRefreshing) {
+          CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = scheme.primary)
+        } else if (state.agents.isNotEmpty()) {
+          NovaIconAction(Icons.Default.Refresh, "Refresh agents", onClick = viewModel::refresh)
         }
       }
     }
+
+    item {
+      NovaFilterChips(
+        options = listOf("All", "Live", "Drafts", "Paused"),
+        selected = filter,
+        onSelect = { filter = it },
+      )
+    }
+
+    state.loadError?.let { error ->
+      item {
+        AgentsInlineError(error, viewModel::refresh)
+      }
+    }
+
+    if (state.isLoading && state.agents.isEmpty()) {
+      item { NovaSkeletonCards(rows = 3, height = 96.dp) }
+    } else if (!state.isLoading && filteredAgents.isEmpty() && state.loadError == null) {
+      item {
+        NovaEmptyState(
+          title = if (state.agents.isEmpty()) "No agents yet" else "No $filter agents",
+          body = if (state.agents.isEmpty()) "Describe one job above and Nova will draft the first version." else "Try another filter to see the rest of your workspace.",
+        )
+      }
+    }
+
+    items(filteredAgents.size, key = { index -> filteredAgents[index].id.ifBlank { "agent-$index" } }) { index ->
+      val agent = filteredAgents[index]
+      AgentListCard(
+        agent = agent,
+        onClick = { viewModel.selectAgent(agent.id) },
+      )
+    }
   }
+
+  if (state.selectedAgentId != null) {
+    AgentDetailSheet(
+      agent = state.selectedAgent,
+      executions = state.selectedExecutions,
+      isLoading = state.isLoadingAgent,
+      operation = state.operation,
+      runMessage = state.runMessage,
+      error = state.detailError,
+      onDismiss = viewModel::closeAgent,
+      onRetry = { agent -> viewModel.selectAgent(agent.id) },
+      onRun = { agent -> viewModel.runAgent(agent, false) },
+      onBackground = { agent -> viewModel.runAgent(agent, true) },
+      onToggleActive = { agent -> viewModel.setAgentActive(agent, agent.status != "active") },
+      onCancelRun = viewModel::cancelSelectedRun,
+      onEdit = { agent ->
+        viewModel.closeAgent()
+        viewModel.openEditor(agent)
+      },
+    )
+  }
+
+  if (state.isEditorOpen && state.draft != null) {
+    AgentEditorSheet(
+      draft = state.draft!!,
+      tools = state.tools,
+      toolError = state.toolsError,
+      isSaving = state.isSaving,
+      error = state.builderError,
+      isEditing = state.editingAgentId != null,
+      onDismiss = viewModel::closeEditor,
+      onNameChange = viewModel::updateDraftName,
+      onDescriptionChange = viewModel::updateDraftDescription,
+      onGoalChange = viewModel::updateDraftGoal,
+      onInstructionsChange = viewModel::updateDraftInstructions,
+      onToolToggle = viewModel::toggleDraftTool,
+      onScheduleChange = viewModel::setDraftSchedule,
+      onTimeChange = viewModel::updateDraftTime,
+      onSave = { activate -> viewModel.saveDraft(activate) },
+    )
+  }
+}
+
+@Composable
+private fun AgentsBuilder(
+  prompt: String,
+  questions: List<String>,
+  error: String?,
+  isBuilding: Boolean,
+  onPromptChange: (String) -> Unit,
+  onBuild: () -> Unit,
+  onClear: () -> Unit,
+) {
+  val scheme = MaterialTheme.colorScheme
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(NovaRadius.xl),
+    color = novaGlassFill(),
+    border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge()),
+  ) {
+    Column(Modifier.padding(NovaSpace.xl), verticalArrangement = Arrangement.spacedBy(NovaSpace.md)) {
+      Row(verticalAlignment = Alignment.Top) {
+        Column(Modifier.weight(1f)) {
+          Text("What should Nova do next?", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleLarge, color = scheme.onSurface)
+          Spacer(Modifier.height(NovaSpace.xs))
+          Text("Start with the outcome. Nova will ask for the missing pieces.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+        }
+        Icon(Icons.Default.AccountTree, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(24.dp))
+      }
+      OutlinedTextField(
+        value = prompt,
+        onValueChange = onPromptChange,
+        modifier = Modifier.fillMaxWidth(),
+        placeholder = { Text("Every weekday, check my GitHub issues and send me a digest") },
+        minLines = 3,
+        maxLines = 5,
+        shape = RoundedCornerShape(NovaRadius.md),
+        colors = novaFieldColors(),
+        isError = error != null,
+      )
+      if (questions.isNotEmpty()) {
+        Text("Nova needs a few answers", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
+        questions.forEachIndexed { index, question ->
+          Text("${index + 1}. $question", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
+        }
+        Text("Add the answers to the brief above, then draft again.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+      }
+      error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = scheme.error) }
+      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+        if (prompt.isNotBlank() && !isBuilding) {
+          TextButton(onClick = onClear, modifier = Modifier.heightIn(min = MinTouchTarget)) {
+            Text("Clear", color = scheme.onSurfaceVariant)
+          }
+        }
+        NovaButton(
+          text = "Draft agent",
+          onClick = onBuild,
+          enabled = prompt.trim().isNotEmpty(),
+          loading = isBuilding,
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun AgentReviewCard(
+  draft: AgentDraft,
+  isSaving: Boolean,
+  error: String?,
+  onEdit: () -> Unit,
+  onSaveDraft: () -> Unit,
+  onActivate: () -> Unit,
+  onDiscard: () -> Unit,
+) {
+  val scheme = MaterialTheme.colorScheme
+  GlassPanel(Modifier.fillMaxWidth(), corner = RoundedCornerShape(NovaRadius.lg)) {
+    Column(Modifier.padding(NovaSpace.xl), verticalArrangement = Arrangement.spacedBy(NovaSpace.md)) {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+          Text("Review before you save", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
+          Text("Nothing is activated until you choose to activate it.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+        }
+        Icon(Icons.Default.Tune, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(22.dp))
+      }
+      AgentReviewField("Goal", draft.goal.ifBlank { "Add a clear outcome" })
+      AgentReviewField("Timing", draft.schedule.toLabel())
+      AgentReviewField("Tools", draft.tools.joinToString("  ·  ") { agentToolLabel(it) }.ifBlank { "No tools chosen yet" })
+      if (draft.description.isNotBlank()) AgentReviewField("Notes", draft.description)
+      if (draft.schedule?.type != null && draft.schedule.type != "run_now") {
+        Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
+          Icon(Icons.Default.WarningAmber, contentDescription = null, tint = scheme.tertiary, modifier = Modifier.size(18.dp))
+          Spacer(Modifier.width(NovaSpace.sm))
+          Text("Recurring timing is saved with the agent. Run now is guaranteed; automatic delivery depends on a connected server worker.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+        }
+      }
+      error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = scheme.error) }
+      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(NovaSpace.sm), verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = onDiscard, enabled = !isSaving, modifier = Modifier.heightIn(min = MinTouchTarget)) { Text("Discard", color = scheme.onSurfaceVariant) }
+        Spacer(Modifier.weight(1f))
+        TextButton(onClick = onEdit, enabled = !isSaving, modifier = Modifier.heightIn(min = MinTouchTarget)) { Text("Edit details", color = scheme.primary) }
+        NovaButton(text = "Activate", onClick = onActivate, loading = isSaving)
+      }
+      TextButton(onClick = onSaveDraft, enabled = !isSaving, modifier = Modifier.fillMaxWidth().heightIn(min = MinTouchTarget)) {
+        Text("Save as draft", color = scheme.onSurfaceVariant)
+      }
+    }
+  }
+}
+
+@Composable
+private fun AgentReviewField(label: String, value: String) {
+  val scheme = MaterialTheme.colorScheme
+  Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+    Text(label, Modifier.width(84.dp), fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = novaFaint())
+    Text(value, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface, maxLines = 4, overflow = TextOverflow.Ellipsis)
+  }
+}
+
+@Composable
+private fun AgentsApprovalPanel(
+  approvals: List<com.nova.app.data.ApprovalDto>,
+  busyId: String?,
+  onDecision: (com.nova.app.data.ApprovalDto, String) -> Unit,
+) {
+  val scheme = MaterialTheme.colorScheme
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(NovaRadius.lg),
+    color = scheme.tertiaryContainer,
+  ) {
+    Column(Modifier.padding(NovaSpace.xl), verticalArrangement = Arrangement.spacedBy(NovaSpace.md)) {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Default.WarningAmber, contentDescription = null, tint = scheme.onTertiaryContainer, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(NovaSpace.sm))
+        Column(Modifier.weight(1f)) {
+          Text("Your call is needed", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onTertiaryContainer)
+          Text("${approvals.size} ${if (approvals.size == 1) "action is" else "actions are"} waiting", style = MaterialTheme.typography.bodySmall, color = scheme.onTertiaryContainer)
+        }
+      }
+      approvals.forEach { approval ->
+        ApprovalRow(approval, busyId == approval.id, busyId == null, onDecision)
+      }
+    }
+  }
+}
+
+@Composable
+private fun ApprovalRow(
+  approval: com.nova.app.data.ApprovalDto,
+  busy: Boolean,
+  enabled: Boolean,
+  onDecision: (com.nova.app.data.ApprovalDto, String) -> Unit,
+) {
+  val scheme = MaterialTheme.colorScheme
+  Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(NovaSpace.sm)) {
+    Text(agentActionLabel(approval.toolId), fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onTertiaryContainer)
+    Text(approval.payload.toPreview(), style = MaterialTheme.typography.bodySmall, color = scheme.onTertiaryContainer, maxLines = 5, overflow = TextOverflow.Ellipsis)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+      TextButton(onClick = { onDecision(approval, "reject") }, enabled = enabled && !busy, modifier = Modifier.heightIn(min = MinTouchTarget)) {
+        Text("Reject", color = scheme.onTertiaryContainer)
+      }
+      Spacer(Modifier.width(NovaSpace.sm))
+      NovaButton(text = "Approve", onClick = { onDecision(approval, "approve") }, loading = busy, enabled = enabled)
+    }
+  }
+}
+
+@Composable
+private fun AgentsInlineError(message: String, onRetry: () -> Unit) {
+  val scheme = MaterialTheme.colorScheme
+  Surface(shape = RoundedCornerShape(NovaRadius.md), color = scheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
+    Row(Modifier.padding(horizontal = NovaSpace.lg, vertical = NovaSpace.md), verticalAlignment = Alignment.CenterVertically) {
+      Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = scheme.onErrorContainer)
+      TextButton(onClick = onRetry, modifier = Modifier.heightIn(min = MinTouchTarget)) { Text("Retry", color = scheme.onErrorContainer) }
+    }
+  }
+}
+
+@Composable
+private fun AgentsNotice(message: String, onDismiss: () -> Unit) {
+  val scheme = MaterialTheme.colorScheme
+  Surface(shape = RoundedCornerShape(NovaRadius.md), color = scheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+    Row(Modifier.padding(start = NovaSpace.lg, top = NovaSpace.sm, bottom = NovaSpace.sm, end = NovaSpace.sm), verticalAlignment = Alignment.CenterVertically) {
+      Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = scheme.onSecondaryContainer)
+      NovaIconAction(Icons.Default.Close, "Dismiss message", onClick = onDismiss)
+    }
+  }
+}
+
+@Composable
+private fun AgentListCard(agent: com.nova.app.data.AgentDto, onClick: () -> Unit) {
+  val scheme = MaterialTheme.colorScheme
+  Surface(
+    onClick = onClick,
+    modifier = Modifier.fillMaxWidth().semantics { role = Role.Button },
+    shape = RoundedCornerShape(NovaRadius.lg),
+    color = novaGlassFill(),
+    border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge()),
+  ) {
+    Row(Modifier.padding(NovaSpace.lg), verticalAlignment = Alignment.CenterVertically) {
+      Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(NovaSpace.xs)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Text(agent.name, Modifier.weight(1f), fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+          AgentStatusText(agent.status)
+        }
+        Text(agent.goal, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(
+          listOf(agent.tools.joinToString("  ·  ") { agentToolLabel(it) }, agent.schedule.toLabel()).filter { it.isNotBlank() }.joinToString("  ·  "),
+          style = MaterialTheme.typography.labelSmall,
+          color = novaFaint(),
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+      Spacer(Modifier.width(NovaSpace.sm))
+      Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = novaFaint(), modifier = Modifier.size(22.dp))
+    }
+  }
+}
+
+@Composable
+private fun AgentStatusText(status: String) {
+  val tone = novaStatusTone(status)
+  Text(
+    agentStatusLabel(status),
+    fontFamily = NovaMono,
+    style = MaterialTheme.typography.labelSmall,
+    fontWeight = FontWeight.SemiBold,
+    color = novaToneColor(tone),
+  )
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun AgentDetailSheet(
+  agent: com.nova.app.data.AgentDto?,
+  executions: List<com.nova.app.data.ExecutionDto>,
+  isLoading: Boolean,
+  operation: AgentOperation?,
+  runMessage: String?,
+  error: String?,
+  onDismiss: () -> Unit,
+  onRetry: (com.nova.app.data.AgentDto) -> Unit,
+  onRun: (com.nova.app.data.AgentDto) -> Unit,
+  onBackground: (com.nova.app.data.AgentDto) -> Unit,
+  onToggleActive: (com.nova.app.data.AgentDto) -> Unit,
+  onCancelRun: () -> Unit,
+  onEdit: (com.nova.app.data.AgentDto) -> Unit,
+) {
+  val scheme = MaterialTheme.colorScheme
+  ModalBottomSheet(
+    onDismissRequest = onDismiss,
+    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    containerColor = novaGlassFill(),
+    contentColor = scheme.onSurface,
+    dragHandle = { BottomSheetDefaults.DragHandle(color = novaFaint()) },
+  ) {
+    if (agent == null) {
+      Box(Modifier.fillMaxWidth().height(220.dp), contentAlignment = Alignment.Center) {
+        if (isLoading) CircularProgressIndicator(color = scheme.primary) else Text("Agent unavailable", color = scheme.onSurfaceVariant)
+      }
+    } else {
+      Column(
+        Modifier.fillMaxWidth().navigationBarsPadding().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = ScreenGutter, vertical = NovaSpace.lg),
+        verticalArrangement = Arrangement.spacedBy(NovaSpace.lg),
+      ) {
+        Row(verticalAlignment = Alignment.Top) {
+          Column(Modifier.weight(1f)) {
+            AgentStatusText(agent.status)
+            Spacer(Modifier.height(NovaSpace.xs))
+            Text(agent.name, fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineMedium, color = scheme.onSurface)
+          }
+          NovaIconAction(Icons.Default.Close, "Close agent details", onClick = onDismiss)
+        }
+        AgentReviewField("Goal", agent.goal)
+        if (!agent.description.isNullOrBlank()) AgentReviewField("Notes", agent.description)
+        AgentReviewField("Timing", agent.schedule.toLabel())
+        AgentReviewField("Tools", agent.tools.joinToString("  ·  ") { agentToolLabel(it) }.ifBlank { "No tools configured" })
+        AgentReviewField("Permissions", agent.permissions.joinToString("  ·  ") { permissionLabel(it) }.ifBlank { "No extra permissions" })
+        val latest = executions.firstOrNull()
+        AgentReviewField("Last run", latest?.startedAt.toRunTime())
+        if (latest != null) {
+          Text(latest.output?.takeIf { it.isNotBlank() } ?: latest.error ?: "No result yet", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant, maxLines = 5, overflow = TextOverflow.Ellipsis)
+        }
+        runMessage?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = scheme.primary) }
+        error?.let { AgentsInlineError(it) { onRetry(agent) } }
+        val running = operation?.kind == AgentOperationKind.RUNNING
+        val changingStatus = operation?.kind == AgentOperationKind.ACTIVATING || operation?.kind == AgentOperationKind.PAUSING
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(NovaSpace.sm), verticalAlignment = Alignment.CenterVertically) {
+          NovaButton(
+            text = "Run now",
+            onClick = { onRun(agent) },
+            enabled = !running && !changingStatus,
+            loading = running,
+            modifier = Modifier.weight(1f),
+          )
+          TextButton(onClick = { onBackground(agent) }, enabled = !running && !changingStatus, modifier = Modifier.heightIn(min = MinTouchTarget)) {
+            Text("Run in background", color = scheme.primary)
+          }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(NovaSpace.sm), verticalAlignment = Alignment.CenterVertically) {
+          TextButton(onClick = { onToggleActive(agent) }, enabled = !running && !changingStatus, modifier = Modifier.heightIn(min = MinTouchTarget)) {
+            Text(if (agent.status.equals("active", true)) "Pause agent" else "Activate agent", color = scheme.primary)
+          }
+          TextButton(onClick = { onEdit(agent) }, enabled = !running && !changingStatus, modifier = Modifier.heightIn(min = MinTouchTarget)) {
+            Text("Edit", color = scheme.onSurfaceVariant)
+          }
+          if (latest?.status in setOf("QUEUED", "RUNNING", "WAITING_FOR_APPROVAL")) {
+            TextButton(onClick = onCancelRun, enabled = operation?.kind != AgentOperationKind.CANCELLING, modifier = Modifier.heightIn(min = MinTouchTarget)) {
+              Text("Cancel", color = scheme.error)
+            }
+          }
+        }
+        Spacer(Modifier.height(NovaSpace.sm))
+      }
+    }
+  }
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun AgentEditorSheet(
+  draft: AgentDraft,
+  tools: List<com.nova.app.data.ToolDto>,
+  toolError: String?,
+  isSaving: Boolean,
+  error: String?,
+  isEditing: Boolean,
+  onDismiss: () -> Unit,
+  onNameChange: (String) -> Unit,
+  onDescriptionChange: (String) -> Unit,
+  onGoalChange: (String) -> Unit,
+  onInstructionsChange: (String) -> Unit,
+  onToolToggle: (String) -> Unit,
+  onScheduleChange: (String) -> Unit,
+  onTimeChange: (String) -> Unit,
+  onSave: (Boolean) -> Unit,
+) {
+  val scheme = MaterialTheme.colorScheme
+  var scheduleType by remember(draft.schedule) { mutableStateOf(draft.schedule.toChoice()) }
+  ModalBottomSheet(
+    onDismissRequest = { if (!isSaving) onDismiss() },
+    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    containerColor = novaGlassFill(),
+    contentColor = scheme.onSurface,
+    dragHandle = { BottomSheetDefaults.DragHandle(color = novaFaint()) },
+  ) {
+    Column(
+      Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = ScreenGutter, vertical = NovaSpace.lg),
+      verticalArrangement = Arrangement.spacedBy(NovaSpace.md),
+    ) {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+          Text(if (isEditing) "Edit agent" else "Review and edit", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineSmall, color = scheme.onSurface)
+          Text("The draft stays yours until you activate it.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+        }
+        NovaIconAction(Icons.Default.Close, "Close editor", enabled = !isSaving, onClick = onDismiss)
+      }
+      OutlinedTextField(draft.name, onNameChange, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(NovaRadius.md), colors = novaFieldColors())
+      OutlinedTextField(draft.description, onDescriptionChange, label = { Text("Description (optional)") }, minLines = 2, maxLines = 3, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(NovaRadius.md), colors = novaFieldColors())
+      OutlinedTextField(draft.goal, onGoalChange, label = { Text("Goal") }, minLines = 2, maxLines = 4, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(NovaRadius.md), colors = novaFieldColors())
+      OutlinedTextField(draft.instructions, onInstructionsChange, label = { Text("Instructions") }, minLines = 3, maxLines = 6, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(NovaRadius.md), colors = novaFieldColors())
+      Text("Tools and connections", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
+      Text("Choose only what this job needs. Write tools always ask for approval before they act.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+      if (tools.isEmpty()) {
+        Text(toolError ?: "The tool catalogue is still loading. You can save the draft and choose tools after it refreshes.", style = MaterialTheme.typography.bodySmall, color = if (toolError != null) scheme.error else novaFaint())
+      } else {
+        tools.forEach { tool ->
+          val checked = tool.id in draft.tools
+          Row(
+            Modifier.fillMaxWidth().heightIn(min = 58.dp).toggleable(value = checked, role = Role.Checkbox, onValueChange = { onToolToggle(tool.id) }).padding(vertical = NovaSpace.sm),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Checkbox(checked = checked, onCheckedChange = null, modifier = Modifier.clearAndSetSemantics {})
+            Spacer(Modifier.width(NovaSpace.sm))
+            Column(Modifier.weight(1f)) {
+              Text(agentToolLabel(tool.id), style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface)
+              Text(tool.description, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            if (tool.isWrite) Text("approval", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.tertiary)
+          }
+        }
+      }
+      Text("When should it run?", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
+      Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(NovaSpace.sm),
+      ) {
+        listOf("run_now" to "Run only", "daily" to "Daily", "weekdays" to "Weekdays", "weekly" to "Weekly").forEach { (value, label) ->
+          FilterChip(
+            selected = scheduleType == value,
+            onClick = {
+              scheduleType = value
+              onScheduleChange(value)
+            },
+            label = { Text(label) },
+            shape = RoundedCornerShape(NovaRadius.sm),
+            modifier = Modifier.heightIn(min = MinTouchTarget),
+          )
+        }
+      }
+      if (scheduleType != "run_now") {
+        OutlinedTextField(
+          value = draft.schedule?.time.orEmpty(),
+          onValueChange = onTimeChange,
+          label = { Text("Time (optional, 24-hour)") },
+          placeholder = { Text("09:00") },
+          singleLine = true,
+          modifier = Modifier.fillMaxWidth(),
+          shape = RoundedCornerShape(NovaRadius.md),
+          colors = novaFieldColors(),
+        )
+        Text("Recurring timing is stored with this agent. Automatic delivery still depends on a connected server worker.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+      }
+      error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = scheme.error) }
+      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(NovaSpace.sm), verticalAlignment = Alignment.CenterVertically) {
+        if (!isEditing) {
+          TextButton(onClick = { onSave(false) }, enabled = !isSaving, modifier = Modifier.heightIn(min = MinTouchTarget)) { Text("Save draft", color = scheme.onSurfaceVariant) }
+        }
+        Spacer(Modifier.weight(1f))
+        NovaButton(text = if (isEditing) "Save changes" else "Save and activate", onClick = { onSave(!isEditing) }, loading = isSaving)
+      }
+      Spacer(Modifier.height(NovaSpace.sm))
+    }
+  }
+}
+
+private fun agentToolLabel(toolId: String): String = when {
+  toolId.startsWith("github_") -> "GitHub"
+  toolId.startsWith("gmail_") -> "Gmail"
+  toolId.startsWith("calendar_") -> "Calendar"
+  toolId.startsWith("drive_") -> "Google Drive"
+  toolId.startsWith("browser_") -> "Browser"
+  toolId.startsWith("leetcode_") -> "LeetCode"
+  toolId == "web_search" -> "Web search"
+  toolId.startsWith("workspace_") -> "Workspace"
+  else -> toolId.replace('_', ' ').replaceFirstChar { it.uppercase() }
+}
+
+private fun permissionLabel(permission: String): String = when {
+  permission.startsWith("github.") -> permission.removePrefix("github.").replace('_', ' ').replaceFirstChar { it.uppercase() }
+  permission.startsWith("gmail.") -> "Gmail " + permission.removePrefix("gmail.").replace('_', ' ')
+  permission.startsWith("calendar.") -> "Calendar " + permission.removePrefix("calendar.").replace('_', ' ')
+  permission == "web.search" -> "Web search"
+  else -> permission.replace('_', ' ').replaceFirstChar { it.uppercase() }
+}
+
+private fun agentActionLabel(toolId: String): String = when (toolId) {
+  "github_create_issue" -> "Create a GitHub issue"
+  "github_comment_on_issue" -> "Comment on a GitHub issue"
+  "github_list_issues" -> "Review GitHub issues"
+  "github_list_pull_requests" -> "Review GitHub pull requests"
+  "github_get_issue" -> "Read a GitHub issue"
+  "gmail_send_email" -> "Send an email"
+  "calendar_create_event" -> "Create a calendar event"
+  "web_search" -> "Search the web"
+  else -> agentToolLabel(toolId)
+}
+
+private fun agentStatusLabel(status: String): String = when (status.lowercase()) {
+  "active" -> "Live"
+  "paused" -> "Paused"
+  "draft" -> "Draft"
+  else -> status.lowercase().replaceFirstChar { it.uppercase() }
+}
+
+private fun JsonElement?.toLabel(): String {
+  val value = this as? JsonObject ?: return "Run only"
+  val type = value["type"]?.jsonPrimitive?.contentOrNull ?: return "Run only"
+  val time = value["time"]?.jsonPrimitive?.contentOrNull
+  val frequency = value["frequency"]?.jsonPrimitive?.contentOrNull
+  return when {
+    type == "once" -> "One time${time?.let { " at $it" }.orEmpty()}"
+    type == "recurring" && frequency == "daily" -> "Every day${time?.let { " at $it" }.orEmpty()}"
+    type == "recurring" && frequency == "weekdays" -> "Every weekday${time?.let { " at $it" }.orEmpty()}"
+    type == "recurring" && frequency == "weekly" -> "Weekly${time?.let { " at $it" }.orEmpty()}"
+    else -> "Recurring"
+  }
+}
+
+private fun AgentScheduleDto?.toLabel(): String {
+  val value = this ?: return "Run only"
+  val time = value.time
+  return when {
+    value.type == "once" -> "One time${time?.let { " at $it" }.orEmpty()}"
+    value.frequency == "daily" -> "Every day${time?.let { " at $it" }.orEmpty()}"
+    value.frequency == "weekdays" -> "Every weekday${time?.let { " at $it" }.orEmpty()}"
+    value.frequency == "weekly" -> "Weekly${time?.let { " at $it" }.orEmpty()}"
+    else -> "Recurring"
+  }
+}
+
+private fun JsonElement?.toChoice(): String {
+  val value = this as? JsonObject ?: return "run_now"
+  val type = value["type"]?.jsonPrimitive?.contentOrNull ?: return "run_now"
+  val frequency = value["frequency"]?.jsonPrimitive?.contentOrNull
+  return if (type == "once") "once" else frequency ?: "run_now"
+}
+
+private fun AgentScheduleDto?.toChoice(): String {
+  val value = this ?: return "run_now"
+  return if (value.type == "once") "once" else value.frequency ?: "run_now"
+}
+
+private fun JsonElement?.toPreview(): String {
+  val value = this as? JsonObject ?: return "Review the action details before deciding."
+  val title = value["title"]?.jsonPrimitive?.contentOrNull
+  val body = value["body"]?.jsonPrimitive?.contentOrNull
+  val repo = value["repo"]?.jsonPrimitive?.contentOrNull
+  return when {
+    !title.isNullOrBlank() -> buildString { if (!repo.isNullOrBlank()) append("$repo · "); append(title); if (!body.isNullOrBlank()) append(" — $body") }
+    !body.isNullOrBlank() -> body
+    else -> value.toString().take(320)
+  }
+}
+
+private fun String?.toRunTime(): String {
+  if (this.isNullOrBlank()) return "No runs yet"
+  return runCatching {
+    val instant = java.time.Instant.parse(this)
+    java.time.format.DateTimeFormatter.ofPattern("MMM d, h:mm a", java.util.Locale.getDefault())
+      .withZone(java.time.ZoneId.systemDefault())
+      .format(instant)
+  }.getOrDefault(this)
 }
 
 @Composable fun ActivityScreen(api: NovaApi, onBack: (() -> Unit)? = null) {

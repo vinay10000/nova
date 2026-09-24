@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -152,6 +153,12 @@ interface NovaApi {
   @retrofit2.http.GET("/v1/agents/{id}")
   suspend fun agent(@retrofit2.http.Path("id") id: String): AgentDto
 
+  @retrofit2.http.PATCH("/v1/agents/{id}")
+  suspend fun updateAgent(
+    @retrofit2.http.Path("id") id: String,
+    @retrofit2.http.Body body: PatchAgentRequest,
+  ): OkResponse
+
   @retrofit2.http.POST("/v1/agents/{id}/activate")
   suspend fun activateAgent(@retrofit2.http.Path("id") id: String): OkResponse
 
@@ -165,10 +172,15 @@ interface NovaApi {
   ): RunAgentResponse
 
   @retrofit2.http.GET("/v1/executions")
-  suspend fun executions(): ExecutionsResponse
+  suspend fun executions(
+    @retrofit2.http.Query("agentId") agentId: String? = null,
+  ): ExecutionsResponse
 
   @retrofit2.http.GET("/v1/executions/{id}")
   suspend fun execution(@retrofit2.http.Path("id") id: String): ExecutionDto
+
+  @retrofit2.http.POST("/v1/executions/{id}/cancel")
+  suspend fun cancelExecution(@retrofit2.http.Path("id") id: String): OkResponse
 
   @retrofit2.http.GET("/v1/approvals")
   suspend fun approvals(@retrofit2.http.Query("status") status: String = "pending"): ApprovalsResponse
@@ -178,6 +190,9 @@ interface NovaApi {
     @retrofit2.http.Path("id") id: String,
     @retrofit2.http.Body body: DecideApprovalRequest,
   ): OkResponse
+
+  @retrofit2.http.GET("/v1/tools")
+  suspend fun tools(): ToolsResponse
 
   // §38 Connections — OAuth flow + status
   @retrofit2.http.GET("/v1/connections")
@@ -311,7 +326,7 @@ interface NovaApi {
 
 // §52 agent DTOs. Build returns either a config or {questions[]} — kept as
 // JsonObject so a model-shape drift shows as UI text, never a crash.
-@Serializable data class OkResponse(val ok: Boolean = true)
+@Serializable data class OkResponse(val ok: Boolean = true, val resumed: Boolean? = null)
 @Serializable data class BuildAgentRequest(val prompt: String)
 @Serializable data class CreateAgentRequest(
   val name: String,
@@ -319,34 +334,73 @@ interface NovaApi {
   val instructions: String,
   val tools: List<String>,
   val description: String? = null,
+  val schedule: JsonElement? = null,
+)
+@Serializable data class PatchAgentRequest(
+  val name: String? = null,
+  val goal: String? = null,
+  val instructions: String? = null,
+  val tools: List<String>? = null,
+  val description: String? = null,
+  val schedule: JsonElement? = null,
 )
 @Serializable data class AgentDto(
-  val id: String,
-  val name: String,
-  val goal: String,
+  val id: String = "",
+  val name: String = "",
+  val goal: String = "",
+  val description: String? = null,
   val instructions: String = "",
   val tools: List<String> = emptyList(),
   val permissions: List<String> = emptyList(),
+  val schedule: JsonElement? = null,
   val status: String = "draft",
+  val createdAt: String? = null,
+  val updatedAt: String? = null,
+  val lastRunAt: String? = null,
+  val nextRunAt: String? = null,
 )
 @Serializable data class AgentsResponse(val agents: List<AgentDto> = emptyList())
 @Serializable data class RunAgentRequest(val background: Boolean = false)
 @Serializable data class RunAgentResponse(val executionId: String, val status: String, val output: String? = null)
-@Serializable data class StepDto(val id: String = "", val label: String)
+@Serializable data class StepDto(
+  val id: String = "",
+  val label: String = "",
+  val toolId: String? = null,
+  val outcome: String? = null,
+  val createdAt: String? = null,
+)
 @Serializable data class ExecutionDto(
   val id: String,
   val status: String,
+  val agentId: String = "",
   val trigger: String = "",
   val output: String? = null,
   val error: String? = null,
+  val startedAt: String? = null,
+  val completedAt: String? = null,
   val steps: List<StepDto> = emptyList(),
   val agent: AgentNameDto? = null,
 )
 @Serializable data class AgentNameDto(val name: String = "")
 @Serializable data class ExecutionsResponse(val executions: List<ExecutionDto> = emptyList())
-@Serializable data class ApprovalDto(val id: String, val toolId: String, val status: String = "pending")
+@Serializable data class ApprovalDto(
+  val id: String,
+  val toolId: String,
+  val status: String = "pending",
+  val executionId: String = "",
+  val payload: JsonElement? = null,
+  val createdAt: String? = null,
+  val decidedAt: String? = null,
+)
 @Serializable data class ApprovalsResponse(val approvals: List<ApprovalDto> = emptyList())
-@Serializable data class DecideApprovalRequest(val decision: String) // approve | reject
+@Serializable data class DecideApprovalRequest(val decision: String)
+@Serializable data class ToolDto(
+  val id: String,
+  val description: String = "",
+  val scope: String = "",
+  val isWrite: Boolean = false,
+)
+@Serializable data class ToolsResponse(val tools: List<ToolDto> = emptyList())
 
 // §38 Connection DTOs
 @Serializable data class ConnectionDto(val provider: String, val status: String, val scopes: List<String> = emptyList(), val providerLogin: String? = null)

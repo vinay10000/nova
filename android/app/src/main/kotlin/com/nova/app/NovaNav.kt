@@ -83,6 +83,7 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
   // into the same chat screen state.
   val chatVm: ChatViewModel = viewModel()
   var authenticated by remember { mutableStateOf(session.get() != null) }
+  var agentBuilderSeed by remember { mutableStateOf<String?>(null) }
   if (!authenticated) {
     // Logged-out chrome is zero: no bar, no clearance. Status bar still cleared.
     CompositionLocalProvider(LocalBottomChrome provides 0.dp) {
@@ -174,7 +175,11 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
               api, session,
               onSettingsClick = { goToTab("settings") },
               onConnectionsClick = { nav.navigate("connections") { launchSingleTop = true } },
-              onAgentsClick = { goToTab("agents") },
+               onAgentsClick = { seed ->
+                 agentBuilderSeed = seed
+                 goToTab("agents")
+               },
+
               onActivityClick = { goToTab("activity") },
               onAllChatsClick = { nav.navigate("allchats") { launchSingleTop = true } },
               vm = chatVm,
@@ -190,7 +195,14 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
               onBack = { nav.popBackStack() },
             )
           }
-          tabComposable("agents") { AgentsScreen(api) }
+           tabComposable("agents") {
+             AgentsScreen(
+               api,
+               initialPrompt = agentBuilderSeed,
+               onPromptConsumed = { agentBuilderSeed = null },
+             )
+           }
+
           tabComposable("activity") { ActivityScreen(api) }
           childComposable("connections") { ConnectionsScreen(api, session, onBack = { nav.popBackStack() }) }
           tabComposable("settings") {
