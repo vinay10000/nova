@@ -149,7 +149,7 @@ object NovaRadius {
   val xl = 26.dp
 }
 
-/** Ambient field stops — the floor strip under the tab bar reuses this pair. */
+/** Ambient field stops for the continuous screen background. */
 object NovaAmbient {
   val TopDark = Color(0xFF0A0A0C)
   val BottomDark = Color(0xFF121214)
@@ -443,7 +443,7 @@ fun GlassPanel(
   val edge = novaGlassEdge()
   val gloss = if (dark) NovaGlass.GlossDark else NovaGlass.GlossLight
   Surface(
-    modifier = modifier.background(fill),
+    modifier = modifier.background(fill, corner),
     shape = corner,
     color = Color.Transparent,
     border = BorderStroke(1.dp, edge),

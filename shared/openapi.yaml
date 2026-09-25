@@ -33,8 +33,27 @@ paths:
       responses: { '200': { description: ok }, '401': { description: unauthenticated } }
   /v1/models:
     get:
-      summary: Model registry for the §7 selector
-      responses: { '200': { description: ok } }
+      summary: Selectable model registry and per-model effort levels
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  models:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, label, description, efforts]
+                      properties:
+                        id: { type: string }
+                        label: { type: string }
+                        description: { type: string }
+                        efforts:
+                          type: array
+                          items: { type: string, enum: [minimal, low, medium, high] }
   /v1/conversations:
     get:
       summary: List/search conversations (§8) — q, archived query params
@@ -57,6 +76,7 @@ paths:
                 conversationId: { type: string }
                 message: { type: string, maxLength: 32000 }
                 model: { type: string }
+                effort: { type: string, enum: [minimal, low, medium, high] }
                 attachmentIds: { type: array, items: { type: string }, maxItems: 5 }
       responses:
         '200':

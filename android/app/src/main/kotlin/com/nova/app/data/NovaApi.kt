@@ -45,11 +45,13 @@ data class StreamChunk(
   val blocks: List<UiBlockDto> = emptyList(),
 )
 
-@Serializable private data class StreamRequest(
+@Serializable
+internal data class ChatStreamRequest(
   val conversationId: String,
   val message: String,
   val model: String? = null,
-  val attachmentIds: List<String> = emptyList(), // §10
+  val effort: String? = null,
+  val attachmentIds: List<String> = emptyList(),
 )
 
 /**
@@ -66,8 +68,8 @@ class ChatStreamClient(
     .readTimeout(0, TimeUnit.MILLISECONDS)
     .build()
 
-  fun stream(conversationId: String, message: String, model: String? = null, attachmentIds: List<String> = emptyList()): Flow<StreamChunk> = callbackFlow {
-    val payload = json.encodeToString(StreamRequest(conversationId, message, model, attachmentIds))
+  internal fun stream(request: ChatStreamRequest): Flow<StreamChunk> = callbackFlow {
+    val payload = json.encodeToString(request)
     val builder = Request.Builder()
       .url("$baseUrl/v1/chat/stream")
       .post(payload.toRequestBody("application/json".toMediaType()))
@@ -265,8 +267,14 @@ interface NovaApi {
 // Mirrors backend StoredFile (metadata only — bytes stay server-side, §46).
 @Serializable data class FileDto(val id: String, val filename: String, val mime: String, val size: Long, val status: String)
 
-@Serializable data class ModelDto(val id: String)
-@Serializable data class ModelsResponse(val models: List<ModelDto>)
+@Serializable
+data class ModelDto(
+  val id: String,
+  val label: String = id,
+  val description: String = "",
+  val efforts: List<String> = emptyList(),
+)
+@Serializable data class ModelsResponse(val models: List<ModelDto> = emptyList())
 
 @Serializable data class LoginRequest(val email: String, val password: String)
 @Serializable data class AuthResponse(val token: String)

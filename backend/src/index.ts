@@ -6,9 +6,11 @@ import { createHash } from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { GoogleGenAI } from '@google/genai';
-import { GeminiProvider, MODELS } from './ai/GeminiProvider.js';
+import { GeminiProvider, isTransientGeminiError } from './ai/GeminiProvider.js';
+import { MODEL_EFFORTS, MODELS, modelCatalog } from './ai/models.js';
 import { createChatService, ConversationNotFoundError } from './services/chatService.js';
 import { executeAgent, runAgentInBackground, scopesForTools } from './services/agentService.js';
+import { createFallbackAgentDraft, normalizeAgentDraft } from './agent/builder.js';
 import { toolRegistry } from './tools/registry.js';
 import { prismaChatStore } from './services/prismaChatStore.js';
 import { prismaAttachmentSource } from './services/prismaAttachmentSource.js';
@@ -318,6 +320,7 @@ const streamBody = z.object({
   conversationId: z.string().min(1),
   message: z.string().min(1).max(32_000),
   model: z.string().optional(),
+  effort: z.enum(MODEL_EFFORTS).optional(),
   attachmentIds: z.array(z.string().min(1)).max(5).optional(), // §10
 });
 
@@ -326,7 +329,7 @@ app.post('/v1/chat/stream', async (req, reply) => {
   if (!userId) return reply;
   const parsed = streamBody.safeParse(req.body);
   if (!parsed.success) return reply.code(400).send({ error: 'invalid_input' });
-  const { conversationId, message, model, attachmentIds } = parsed.data;
+  const { conversationId, message, model, effort, attachmentIds } = parsed.data;
 
   // Ownership validated BEFORE headers: a foreign/missing conversation is HTTP 404,
   // not an SSE error event after HTTP 200.
@@ -350,7 +353,7 @@ app.post('/v1/chat/stream', async (req, reply) => {
   req.raw.on('close', () => ac.abort());
 
   try {
-    for await (const chunk of chat.stream({ conversationId, userId, message, model, attachmentIds, signal: ac.signal })) {
+    for await (const chunk of chat.stream({ conversationId, userId, message, model, effort, attachmentIds, signal: ac.signal })) {
       if (ac.signal.aborted) break;
       send(chunk);
     }
@@ -368,7 +371,7 @@ app.post('/v1/chat/stream', async (req, reply) => {
 });
 
 app.get('/v1/models', async () => ({
-  models: [...new Set([MODELS.chat, MODELS.vision])].map((id) => ({ id })),
+  models: modelCatalog(),
 }));
 
 // ---- §11 output: remote TTS via Gemini 2.5 Flash Native Audio Dialog, swappable with device TTS ----
@@ -468,10 +471,16 @@ app.post('/v1/agents/build', async (req, reply) => {
   const body = z.object({ prompt: z.string().min(1).max(2000) }).safeParse(req.body);
   if (!body.success) return reply.code(400).send({ error: 'invalid_input' });
   try {
-    return await ai.generateAgentConfig(body.data.prompt, [...toolRegistry.keys()]);
+    const generated = await ai.generateAgentConfig(body.data.prompt, [...toolRegistry.keys()]);
+    return normalizeAgentDraft(generated, body.data.prompt, [...toolRegistry.keys()]);
   } catch (err) {
+    if (isTransientGeminiError(err)) {
+      req.log.warn({ err }, 'builder upstream transient; using deterministic draft');
+      const fallback = createFallbackAgentDraft(body.data.prompt, [...toolRegistry.keys()]);
+      if ('questions' in fallback) return reply.code(503).send({ error: 'builder_busy', retryable: true });
+      return fallback;
+    }
     req.log.error(err);
-    // Quota exhaustion is transient and retryable — never a 502.
     if (err instanceof Error && /429|quota|rate/i.test(err.message)) {
       return reply.code(429).send({ error: 'rate_limited', retryable: true });
     }

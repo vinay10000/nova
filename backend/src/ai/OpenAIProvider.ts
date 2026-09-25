@@ -1,5 +1,5 @@
-import type { AIProvider, ChatMessage, InlinePart, StreamChunk, ToolDef } from './AIProvider.js';
-import { MODELS } from './models.js';
+import type { AIProvider, ChatMessage, InlinePart, StreamChatOptions, StreamChunk } from './AIProvider.js';
+import { MODELS, resolveModelEffort } from './models.js';
 
 // Model policy lives in ./models.js (single source of truth, F1 fix).
 export { MODELS } from './models.js';
@@ -32,14 +32,7 @@ export class OpenAIProvider implements AIProvider {
 
   async *streamChat(
     messages: ChatMessage[],
-    opts?: {
-      model?: string;
-      tools?: ToolDef[];
-      signal?: AbortSignal;
-      attachments?: InlinePart[];
-      extractedText?: string;
-      functionResults?: { type: 'function_result'; name: string; call_id: string; result: string; is_error?: boolean }[];
-    },
+    opts?: StreamChatOptions,
   ): AsyncGenerator<StreamChunk> {
     opts?.signal?.throwIfAborted?.();
 
@@ -65,8 +58,10 @@ export class OpenAIProvider implements AIProvider {
       stream: true,
     };
 
-    // Enable reasoning for tool-capable models that support it
-    if (toolsRouterConfigured) {
+    const effort = resolveModelEffort(opts?.effort);
+    if (effort) {
+      body.reasoning_effort = effort;
+    } else if (toolsRouterConfigured) {
       body.reasoning_effort = 'medium';
     }
 

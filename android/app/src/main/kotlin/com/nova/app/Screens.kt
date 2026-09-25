@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -72,6 +74,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -85,6 +88,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -122,7 +126,9 @@ import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.compose.elements.MarkdownHighlightedCodeFence
 import com.nova.app.data.ChatStreamClient
+import com.nova.app.data.ChatStreamRequest
 import com.nova.app.data.ConversationDto
+import com.nova.app.data.GenerationSelection
 import com.nova.app.data.LoginRequest
 import com.nova.app.data.ModelDto
 import com.nova.app.data.NovaApi
@@ -323,11 +329,18 @@ class ChatViewModel(
   private val _notice = MutableStateFlow<String?>(null)
   val notice: StateFlow<String?> = _notice.asStateFlow()
 
-  var model: String? = null          // §7 model selection; null = backend default
+  private val _generation = MutableStateFlow(GenerationSelection())
+  val generation: StateFlow<GenerationSelection> = _generation.asStateFlow()
+  private val _models = MutableStateFlow<List<ModelDto>>(emptyList())
+  val models: StateFlow<List<ModelDto>> = _models.asStateFlow()
+  private val _catalogError = MutableStateFlow(false)
+  val catalogError: StateFlow<Boolean> = _catalogError.asStateFlow()
 
   private var job: Job? = null
   private var lastUserText: String? = null
-  private var uploadApi: NovaApi? = null // set via configureApi(); uploads go through the same authenticated client
+  private var lastSelection: GenerationSelection? = null
+  private var uploadApi: NovaApi? = null
+  private var configuredApi: NovaApi? = null
 
   // §10 attachments pending on the next message. Ids are backend-issued; nothing is trusted client-side.
   data class PendingAttachment(val id: String, val filename: String, val size: Long, val mime: String = "")
@@ -336,7 +349,35 @@ class ChatViewModel(
   private val _uploading = MutableStateFlow(false)
   val uploading: StateFlow<Boolean> = _uploading.asStateFlow()
 
-  fun configureApi(api: NovaApi) { uploadApi = api }
+  fun configureApi(api: NovaApi) {
+    if (configuredApi === api) return
+    configuredApi = api
+    uploadApi = api
+    loadModelCatalog()
+  }
+
+  fun loadModelCatalog() {
+    val api = uploadApi ?: return
+    viewModelScope.launch {
+      _catalogError.value = false
+      runCatching { api.models() }
+        .onSuccess { response ->
+          _models.value = response.models
+          _generation.value = _generation.value.validated(response.models)
+        }
+        .onFailure { _catalogError.value = true }
+    }
+  }
+
+  fun selectModel(modelId: String?) {
+    val next = _generation.value.selectModel(modelId)
+    _generation.value = if (_models.value.isEmpty()) next else next.validated(_models.value)
+  }
+
+  fun selectEffort(effort: String?) {
+    val next = _generation.value.selectEffort(effort)
+    _generation.value = if (_models.value.isEmpty()) next else next.validated(_models.value)
+  }
 
   /** §10: upload a picked content:// uri, then hold its backend id for the next send. */
   fun addAttachment(context: android.content.Context, uri: android.net.Uri) {
@@ -366,9 +407,11 @@ class ChatViewModel(
     _pending.value = _pending.value.filter { it.id != id }
   }
 
-  fun send(text: String) {
+  fun send(text: String, selectionOverride: GenerationSelection? = null) {
     if (text.isBlank() || _streaming.value) return
+    val selection = selectionOverride ?: _generation.value
     lastUserText = text
+    lastSelection = selection
     val attachmentIds = _pending.value.map { it.id } // consumed once, then cleared
     val attachmentInfos = _pending.value.map { com.nova.app.data.AttachmentInfo(it.id, it.filename, it.mime, it.size) }
     _pending.value = emptyList()
@@ -398,7 +441,7 @@ class ChatViewModel(
       if (cid == null) return@launch
       conversationId = cid
       _conversationId.value = cid
-      client.stream(cid, text, model, attachmentIds)
+      client.stream(ChatStreamRequest(cid, text, selection.modelId, selection.effort, attachmentIds))
         .catch { _error.value = it.message ?: "stream_failed" }
         .collect { chunk ->
           when (chunk.type) {
@@ -477,7 +520,7 @@ class ChatViewModel(
     if (list.lastOrNull()?.role == "assistant") list.removeAt(list.lastIndex)
     if (list.lastOrNull()?.role == "user") list.removeAt(list.lastIndex)
     _messages.value = list
-    send(prompt)
+    send(prompt, lastSelection)
   }
 
   /** §6 edit user message — rewinds to that message and resends the edited text. */
@@ -497,6 +540,7 @@ class ChatViewModel(
     conversationId = id
     _conversationId.value = id
     lastUserText = null
+    lastSelection = null
     _error.value = null
     _messages.value = emptyList()
   }
@@ -523,6 +567,7 @@ class ChatViewModel(
     // A stale prompt from the previous chat would be resent by "regenerate"
     // here — it belongs to a conversation that is no longer on screen.
     lastUserText = null
+    lastSelection = null
     _pending.value = emptyList()
   }
 
@@ -719,42 +764,34 @@ private fun TypingIndicator(modifier: Modifier = Modifier) {
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit = {}, onConnectionsClick: () -> Unit = {}, onAgentsClick: (String?) -> Unit = {}, onActivityClick: () -> Unit = {}, onAllChatsClick: () -> Unit = {}, vm: ChatViewModel = viewModel()) {
+fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit = {}, onConnectionsClick: () -> Unit = {}, onAgentsClick: (String?) -> Unit = {}, onActivityClick: () -> Unit = {}, onAllChatsClick: () -> Unit = {}, onDrawerOpenChanged: (Boolean) -> Unit = {}, vm: ChatViewModel = viewModel()) {
   LaunchedEffect(session) { vm.configureSession(session) }
   LaunchedEffect(api) { vm.configureApi(api) }
   var conversations by remember { mutableStateOf<List<ConversationDto>>(emptyList()) }
-  var convTotal by remember { mutableStateOf(0) }
-  var convHasMore by remember { mutableStateOf(false) }
   var convLoading by remember { mutableStateOf(false) }
-  var models by remember { mutableStateOf<List<ModelDto>>(emptyList()) }
-  var model by remember { mutableStateOf<String?>(null) }
   var editIndex by remember { mutableStateOf<Int?>(null) }
   var offline by remember { mutableStateOf(false) }
   val context = LocalContext.current
   val clipboard = LocalClipboardManager.current
+  val focusManager = LocalFocusManager.current
+  val keyboardController = LocalSoftwareKeyboardController.current
   val scheme = MaterialTheme.colorScheme
 
-  suspend fun loadConversations(reset: Boolean = false) {
+  suspend fun loadConversations() {
     if (convLoading) return
     convLoading = true
     runCatching {
-      val offset = if (reset) 0 else conversations.size
       // Sidebar shows only the 10 most recent chats; the full history lives on
       // the All Chats screen (§8 list) so the drawer stays scannable.
-      val res = api.conversations(limit = 10, offset = offset)
-      conversations = if (reset) res.conversations else conversations + res.conversations
-      convTotal = res.total
-      convHasMore = res.hasMore
+      conversations = api.conversations(limit = 10, offset = 0).conversations
       offline = false
     }.onFailure {
       offline = true
-      convHasMore = false
     }
     convLoading = false
   }
   LaunchedEffect(Unit) {
-    runCatching { models = api.models().models }
-    loadConversations(reset = true)
+    loadConversations()
     // No eager createConversation() here: the chat is created on the first
     // send. Creating on launch put one empty conversation in the history
     // every time the app was opened and abandoned.
@@ -768,17 +805,37 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   val activeConversationId by vm.activeConversationId.collectAsState()
   val pending by vm.pending.collectAsState()
   val uploading by vm.uploading.collectAsState()
+  val generation by vm.generation.collectAsState()
+  val models by vm.models.collectAsState()
+  val catalogError by vm.catalogError.collectAsState()
+  var generationPicker by rememberSaveable { mutableStateOf<String?>(null) }
+  val selectedModel = models.firstOrNull { it.id == generation.modelId }
+  val effortOptions = selectedModel?.efforts?.takeIf { it.isNotEmpty() }
+    ?: models.flatMap { it.efforts }.distinct()
+  val effortLabel = generation.effort?.let { effortDisplayLabel(it) } ?: "Default"
+  fun openGenerationPicker(kind: String) {
+    focusManager.clearFocus()
+    keyboardController?.hide()
+    generationPicker = kind
+  }
   // A lazily created chat (first send) or a brand-new "New chat" is absent
   // from the drawer list until it is refreshed.
   LaunchedEffect(activeConversationId) {
     if (activeConversationId != null && conversations.none { it.id == activeConversationId }) {
-      loadConversations(reset = true)
+      loadConversations()
     }
   }
   var input by remember { mutableStateOf("") }
   val listState = rememberLazyListState()
   val scope = rememberCoroutineScope()
   val drawerState = rememberDrawerState(DrawerValue.Closed)
+  val drawerOpenCallback by rememberUpdatedState(onDrawerOpenChanged)
+  LaunchedEffect(drawerState) {
+    snapshotFlow { drawerState.currentValue }.collect { drawerOpenCallback(it != DrawerValue.Closed) }
+  }
+  DisposableEffect(drawerState) {
+    onDispose { drawerOpenCallback(false) }
+  }
   var creatingChat by remember { mutableStateOf(false) }
   var drawerDelete by remember { mutableStateOf<ConversationDto?>(null) }
 
@@ -799,7 +856,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
       runCatching { api.createConversation() }
         .onSuccess { created ->
           vm.newChat(created.id)
-          loadConversations(reset = true)
+          loadConversations()
         }
         .onFailure { vm.clearError() }
       creatingChat = false
@@ -879,8 +936,6 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     if (total > 0 && followStream.value) listState.scrollToItem(total - 1)
   }
 
-  fun shortModel(id: String): String = id.removePrefix("gemini-").removePrefix("models/").take(18)
-
   // Deleting from the library is destructive and cannot be undone server-side,
   // so the row stages it and this confirms.
   drawerDelete?.let { target ->
@@ -901,7 +956,6 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             runCatching { api.deleteConversation(target.id) }
               .onSuccess {
                 conversations = conversations.filter { it.id != target.id }
-                convTotal = (convTotal - 1).coerceAtLeast(0)
                 if (activeConversationId == target.id) createFreshChat()
               }
               .onFailure { vm.clearError() }
@@ -991,15 +1045,6 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                 tint = scheme.error,
                 onClick = { drawerDelete = c },
               )
-            }
-          }
-          // Load more trigger
-          if (convHasMore && !convLoading) {
-            item {
-              LaunchedEffect(Unit) { loadConversations() }
-              Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.Center) {
-                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = scheme.onSurfaceVariant)
-              }
             }
           }
           if (convLoading && conversations.isNotEmpty()) {
@@ -1109,19 +1154,6 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               onClick = { topMenu = true },
             )
             DropdownMenu(expanded = topMenu, onDismissRequest = { topMenu = false }, containerColor = novaGlassFill()) {
-              if (models.isNotEmpty()) {
-                models.forEach { m ->
-                  DropdownMenuItem(
-                    text = { Text(m.id, fontFamily = NovaMono, style = MaterialTheme.typography.bodySmall) },
-                    trailingIcon = if (model == m.id) {
-                      { Icon(Icons.Default.Check, contentDescription = "Selected model", modifier = Modifier.size(16.dp)) }
-                    } else null,
-                    onClick = {
-                      model = m.id; vm.model = m.id; topMenu = false
-                    },
-                  )
-                }
-              }
                DropdownMenuItem(
                  text = { Text("Search chats") },
                  leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
@@ -1342,6 +1374,10 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
           } else {
             // Spec S08: left-aligned white 16sp reply + action icon row.
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
+              if (m.reasoning.isNotBlank()) {
+                NovaReasoningBlock(m.reasoning, streaming = false)
+                if (m.content.isNotEmpty()) Spacer(Modifier.height(NovaSpace.xs))
+              }
               MarkdownBody(m.content, false)
               if (m.ui.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
@@ -1385,50 +1421,9 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               Spacer(Modifier.height(6.dp))
             }
 
-            // Collapsible reasoning / thinking section
-            if (sm.reasoning.isNotEmpty()) {
-              Spacer(Modifier.height(6.dp))
-              var reasoningExpanded by remember { mutableStateOf(false) }
-              Surface(
-                onClick = { reasoningExpanded = !reasoningExpanded },
-                shape = RoundedCornerShape(NovaRadius.row),
-                color = novaGlassFill(),
-                modifier = Modifier.fillMaxWidth(),
-              ) {
-                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-                  Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                      Icons.Default.AccountTree,
-                      contentDescription = null,
-                      modifier = Modifier.size(14.dp),
-                      tint = scheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                      "Thinking",
-                      style = MaterialTheme.typography.labelMedium,
-                      fontFamily = NovaDisplay,
-                      color = scheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Icon(
-                      if (reasoningExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                      contentDescription = null,
-                      modifier = Modifier.size(16.dp),
-                      tint = scheme.onSurfaceVariant.copy(alpha = 0.5f),
-                    )
-                  }
-                  if (reasoningExpanded) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                      sm.reasoning,
-                      style = MaterialTheme.typography.bodySmall,
-                      color = scheme.onSurfaceVariant.copy(alpha = 0.8f),
-                      lineHeight = 18.sp,
-                    )
-                  }
-                }
-              }
+            if (sm.reasoning.isNotBlank()) {
+              NovaReasoningBlock(sm.reasoning, streaming = true)
+              Spacer(Modifier.height(NovaSpace.xs))
             }
 
             Spacer(Modifier.height(6.dp))
@@ -1706,6 +1701,24 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             }
           }
         }
+        Row(
+          Modifier.fillMaxWidth().padding(start = NovaSpace.sm, end = NovaSpace.sm, bottom = NovaSpace.xs),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          GenerationTrigger(
+            value = selectedModel?.label ?: "Model: Auto",
+            contentLabel = "Model",
+            enabled = !streaming && !uploading,
+            onClick = { openGenerationPicker("model") },
+            modifier = Modifier.weight(1f, fill = false),
+          )
+          GenerationTrigger(
+            value = "Effort: $effortLabel",
+            contentLabel = "Thinking effort",
+            enabled = !streaming && !uploading,
+            onClick = { openGenerationPicker("effort") },
+          )
+        }
       }
     }
     } // overlay Column
@@ -1752,8 +1765,265 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
         }
       }
     }
+
+    generationPicker?.let { picker ->
+      GenerationPickerSheet(
+        kind = picker,
+        models = models,
+        selection = generation,
+        effortOptions = effortOptions,
+        catalogError = catalogError,
+        onRetry = vm::loadModelCatalog,
+        onSelectModel = vm::selectModel,
+        onSelectEffort = vm::selectEffort,
+        onDismiss = { generationPicker = null },
+      )
+    }
   }
 }
+}
+
+@Composable
+private fun NovaReasoningBlock(reasoning: String, streaming: Boolean) {
+  var expanded by rememberSaveable(streaming) { mutableStateOf(streaming) }
+  val scheme = MaterialTheme.colorScheme
+  Column(Modifier.fillMaxWidth().animateContentSize(animationSpec = tween(NovaMotion.Standard, easing = NovaMotion.Ease))) {
+    Row(
+      Modifier
+        .fillMaxWidth()
+        .heightIn(min = MinTouchTarget)
+        .toggleable(
+          value = expanded,
+          onValueChange = { expanded = it },
+          role = Role.Button,
+        )
+        .semantics {
+          contentDescription = "Reasoning"
+          stateDescription = if (expanded) "Expanded" else "Collapsed"
+        },
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(
+        "Reasoning",
+        style = MaterialTheme.typography.labelLarge,
+        color = scheme.onSurfaceVariant,
+      )
+      Spacer(Modifier.weight(1f))
+      Icon(
+        if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+        contentDescription = null,
+        tint = scheme.onSurfaceVariant,
+        modifier = Modifier.size(20.dp),
+      )
+    }
+    AnimatedVisibility(
+      visible = expanded,
+      enter = fadeIn(tween(NovaMotion.Quick, easing = NovaMotion.Ease)) + expandVertically(tween(NovaMotion.Quick, easing = NovaMotion.Ease)),
+      exit = fadeOut(tween(NovaMotion.Quick, easing = NovaMotion.Ease)) + shrinkVertically(tween(NovaMotion.Quick, easing = NovaMotion.Ease)),
+    ) {
+      Row(
+        Modifier.fillMaxWidth().height(IntrinsicSize.Min).padding(top = NovaSpace.xs, end = NovaSpace.sm),
+      ) {
+        Box(
+          Modifier
+            .width(2.dp)
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(1.dp))
+            .background(scheme.outlineVariant.copy(alpha = 0.55f)),
+        )
+        Text(
+          reasoning.trim(),
+          modifier = Modifier.padding(start = NovaSpace.md),
+          style = MaterialTheme.typography.bodySmall,
+          color = scheme.onSurfaceVariant,
+          lineHeight = 19.sp,
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun GenerationTrigger(
+  value: String,
+  contentLabel: String,
+  enabled: Boolean,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val scheme = MaterialTheme.colorScheme
+  TextButton(
+    onClick = onClick,
+    enabled = enabled,
+    modifier = modifier
+      .heightIn(min = MinTouchTarget)
+      .semantics {
+        this.contentDescription = contentLabel
+        stateDescription = value
+      },
+    contentPadding = PaddingValues(horizontal = NovaSpace.sm, vertical = NovaSpace.xs),
+    colors = ButtonDefaults.textButtonColors(
+      contentColor = scheme.onSurfaceVariant,
+      disabledContentColor = scheme.onSurfaceVariant.copy(alpha = 0.85f),
+    ),
+  ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text(
+        value,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        style = MaterialTheme.typography.labelLarge,
+      )
+      Icon(
+        Icons.Default.ExpandMore,
+        contentDescription = null,
+        modifier = Modifier.size(18.dp),
+      )
+    }
+  }
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun GenerationPickerSheet(
+  kind: String,
+  models: List<ModelDto>,
+  selection: GenerationSelection,
+  effortOptions: List<String>,
+  catalogError: Boolean,
+  onRetry: () -> Unit,
+  onSelectModel: (String?) -> Unit,
+  onSelectEffort: (String?) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val scheme = MaterialTheme.colorScheme
+  ModalBottomSheet(
+    onDismissRequest = onDismiss,
+    containerColor = novaGlassFill(),
+    contentColor = scheme.onSurface,
+    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+  ) {
+    Column(
+      Modifier
+        .fillMaxWidth()
+        .navigationBarsPadding()
+        .verticalScroll(rememberScrollState())
+        .padding(horizontal = ScreenGutter, vertical = NovaSpace.sm)
+        .padding(bottom = NovaSpace.xl),
+    ) {
+      Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+          if (kind == "model") "Model" else "Thinking effort",
+          modifier = Modifier.weight(1f),
+          fontFamily = NovaDisplay,
+          style = MaterialTheme.typography.titleLarge,
+          color = scheme.onSurface,
+        )
+        NovaIconAction(Icons.Default.Close, "Close", onClick = onDismiss)
+      }
+      Spacer(Modifier.height(NovaSpace.sm))
+      Column(Modifier.selectableGroup()) {
+        if (kind == "model") {
+          GenerationOptionRow(
+            title = "Auto",
+            description = "Let Nova choose the default model.",
+            selected = selection.modelId == null,
+            onClick = { onSelectModel(null) },
+          )
+          if (catalogError) {
+            Row(
+              Modifier.fillMaxWidth().padding(vertical = NovaSpace.sm),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Text(
+                "Model list unavailable.",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                color = scheme.error,
+              )
+              TextButton(onClick = onRetry) { Text("Retry") }
+            }
+          } else if (models.isEmpty()) {
+            Row(
+              Modifier.fillMaxWidth().heightIn(min = MinTouchTarget),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = scheme.primary)
+              Spacer(Modifier.width(NovaSpace.sm))
+              Text("Loading models", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
+            }
+          } else {
+            models.forEach { model ->
+              GenerationOptionRow(
+                title = model.label,
+                description = model.description,
+                selected = selection.modelId == model.id,
+                onClick = { onSelectModel(model.id) },
+              )
+            }
+          }
+        } else {
+          GenerationOptionRow(
+            title = "Default",
+            description = "Use the model's own thinking depth.",
+            selected = selection.effort == null,
+            onClick = { onSelectEffort(null) },
+          )
+          effortOptions.forEach { effort ->
+            GenerationOptionRow(
+              title = effortDisplayLabel(effort),
+              description = effortDescription(effort),
+              selected = selection.effort == effort,
+              onClick = { onSelectEffort(effort) },
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun GenerationOptionRow(
+  title: String,
+  description: String,
+  selected: Boolean,
+  onClick: () -> Unit,
+) {
+  val scheme = MaterialTheme.colorScheme
+  Row(
+    Modifier
+      .fillMaxWidth()
+      .heightIn(min = 64.dp)
+      .selectable(selected = selected, onClick = onClick, role = Role.RadioButton)
+      .padding(vertical = NovaSpace.sm),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Column(Modifier.weight(1f)) {
+      Text(
+        title,
+        style = MaterialTheme.typography.bodyLarge,
+        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        color = scheme.onSurface,
+      )
+      Text(
+        description,
+        style = MaterialTheme.typography.bodySmall,
+        color = scheme.onSurfaceVariant,
+      )
+    }
+    RadioButton(selected = selected, onClick = null)
+  }
+}
+
+private fun effortDisplayLabel(effort: String): String = effort.replaceFirstChar { it.uppercase() }
+
+private fun effortDescription(effort: String): String = when (effort) {
+  "minimal" -> "Fastest responses for simple requests."
+  "low" -> "Light reasoning for everyday work."
+  "medium" -> "Balanced depth and speed."
+  "high" -> "Deepest reasoning for complex work."
+  else -> "Custom thinking depth."
 }
 
 @Composable fun AgentsScreen(
@@ -3126,7 +3396,103 @@ private fun oauthErrorText(code: String): String = when (code) {
   }
 }
 
-@Composable fun SettingsScreen(session: SessionToken, onLogout: () -> Unit, onBack: (() -> Unit)? = null, onPreferencesChanged: () -> Unit = {}, onConnectionsClick: () -> Unit = {}) {
+@Composable
+private fun SettingsSectionLabel(text: String, modifier: Modifier = Modifier) {
+  Text(
+    text,
+    modifier = modifier.padding(start = NovaSpace.xs),
+    fontSize = 14.sp,
+    fontWeight = FontWeight.SemiBold,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+  )
+}
+
+@Composable
+private fun SettingsGroup(content: @Composable ColumnScope.() -> Unit) {
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(NovaRadius.lg),
+    color = novaGlassFill(),
+    border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge()),
+  ) {
+    Column(content = content)
+  }
+}
+
+@Composable
+private fun SettingsGroupDivider() {
+  Box(
+    Modifier
+      .fillMaxWidth()
+      .padding(start = 60.dp)
+      .height(1.dp)
+      .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+  )
+}
+
+@Composable
+private fun SettingsGroupRow(
+  label: String,
+  modifier: Modifier = Modifier,
+  subtitle: String? = null,
+  onClick: (() -> Unit)? = null,
+  leading: (@Composable () -> Unit)? = null,
+  trailing: (@Composable () -> Unit)? = null,
+  labelColor: Color = MaterialTheme.colorScheme.onSurface,
+) {
+  val content: @Composable () -> Unit = {
+    Row(
+      Modifier
+        .fillMaxWidth()
+        .heightIn(min = 60.dp)
+        .padding(horizontal = NovaSpace.lg, vertical = NovaSpace.sm),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      leading?.let {
+        Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) { it() }
+        Spacer(Modifier.width(NovaSpace.md))
+      }
+      Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+          label,
+          fontSize = 16.sp,
+          fontWeight = FontWeight.SemiBold,
+          color = labelColor,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+        subtitle?.let {
+          Text(
+            it,
+            fontSize = 14.sp,
+            lineHeight = 20.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+      }
+      trailing?.let {
+        Spacer(Modifier.width(NovaSpace.md))
+        it()
+      }
+    }
+  }
+  if (onClick != null) {
+    Surface(
+      onClick = onClick,
+      modifier = modifier.fillMaxWidth().semantics { role = Role.Button },
+      shape = RoundedCornerShape(0.dp),
+      color = Color.Transparent,
+      content = content,
+    )
+  } else {
+    Box(modifier.fillMaxWidth()) { content() }
+  }
+}
+
+@Composable
+fun SettingsScreen(session: SessionToken, onLogout: () -> Unit, onBack: (() -> Unit)? = null, onPreferencesChanged: () -> Unit = {}, onConnectionsClick: () -> Unit = {}) {
   val context = LocalContext.current
   var granted by remember {
     mutableStateOf(
@@ -3138,13 +3504,26 @@ private fun oauthErrorText(code: String): String = when (code) {
   val request = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
 
   val rawEmail = session.getEmail()
-  val displayEmail = if (rawEmail != null && rawEmail.contains("@")) rawEmail else "Signed in"
-  val initial = displayEmail.take(1).uppercase()
+  val hasEmail = rawEmail?.contains("@") == true
+  val accountEmail = if (hasEmail) rawEmail.orEmpty() else "Signed in"
+  val initial = rawEmail?.trim()?.takeIf { it.isNotEmpty() }?.take(1)?.uppercase() ?: "N"
   val scheme = MaterialTheme.colorScheme
   var showSignOutConfirm by remember { mutableStateOf(false) }
+  var themeMenu by remember { mutableStateOf(false) }
+  var accentMenu by remember { mutableStateOf(false) }
 
-  // Permission can change in Android system settings while this screen is
-  // paused. Refresh the switch when the user returns so it never lies.
+  val currentMode = NovaThemeMode.entries.find {
+    it.name.equals(AccentPreferences.getThemeMode(context), ignoreCase = true)
+  } ?: NovaThemeMode.SYSTEM
+  val modeLabels = listOf(
+    NovaThemeMode.SYSTEM to "System (Default)",
+    NovaThemeMode.LIGHT to "Light",
+    NovaThemeMode.DARK to "Dark",
+  )
+  val currentAccentName = AccentPreferences.get(context)
+  val currentAccent = NovaAccent.entries.find { it.name.equals(currentAccentName, ignoreCase = true) } ?: NovaAccent.PURPLE
+  val bottomChrome = LocalBottomChrome.current
+
   val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
   DisposableEffect(lifecycleOwner) {
     val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -3156,253 +3535,247 @@ private fun oauthErrorText(code: String): String = when (code) {
     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
   }
 
-  // Glass page: per-row glass cards, section labels, red log-out card at the end.
-  LazyColumn(
-    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-    contentPadding = PaddingValues(top = 12.dp, bottom = 28.dp + LocalBottomChrome.current),
-    verticalArrangement = Arrangement.spacedBy(6.dp),
-  ) {
+  Box(Modifier.fillMaxSize()) {
+    LazyColumn(
+      modifier = Modifier.fillMaxSize().padding(start = NovaSpace.lg, end = NovaSpace.lg, bottom = bottomChrome),
+      contentPadding = PaddingValues(top = NovaSpace.sm, bottom = NovaSpace.xxl),
+      verticalArrangement = Arrangement.spacedBy(NovaSpace.sm),
+    ) {
     item {
-      // Header: back circle left, account name 17px tertiary centered.
-      Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+      Row(
+        Modifier.fillMaxWidth().padding(top = NovaSpace.xs, bottom = NovaSpace.xs),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
         if (onBack != null) {
           SpecCircleButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", onClick = onBack)
+        } else {
+          Spacer(Modifier.size(MinTouchTarget))
         }
-        Text(
-          displayEmail,
-          modifier = Modifier.align(Alignment.Center).padding(horizontal = 56.dp),
-          fontSize = 17.sp,
-          color = scheme.onSurfaceVariant,
-          maxLines = 1,
-        )
-      }
-    }
-
-    item { SpecSectionLabel("Account", modifier = Modifier.padding(top = 8.dp)) }
-
-    item {
-      SpecSettingsRow(
-        label = displayEmail,
-        subtitle = "Signed in",
-        leading = {
-          Text(initial, fontWeight = FontWeight.Bold, fontSize = 18.sp, color = scheme.primary)
-        },
-      )
-    }
-
-    item { SpecSectionLabel("Model & accounts", modifier = Modifier.padding(top = 8.dp)) }
-
-    item {
-      // Model policy — what Nova runs on, stated plainly (§7).
-      SpecSettingsRow(
-        label = "Model",
-        subtitle = "Gemini 3.1 Flash Lite for chat. Gemini 3.5 Flash Lite handles tools and images.",
-      )
-    }
-
-    item {
-      // Connected accounts — one tap to the Connections screen (§38).
-      SpecSettingsRow(
-        label = "Connected accounts",
-        subtitle = "GitHub, Gmail, Calendar, Drive, Docs, Sheets, Vercel, Supabase, LeetCode",
-        onClick = onConnectionsClick,
-        leading = {
-          Icon(Icons.Default.Link, contentDescription = null, tint = scheme.onSurface, modifier = Modifier.size(24.dp))
-        },
-        trailing = {
-          Icon(
-            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = null,
-            tint = scheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp),
-          )
-        },
-      )
-    }
-
-    item { SpecSectionLabel("Notifications", modifier = Modifier.padding(top = 8.dp)) }
-
-    item {
-      SpecSettingsRow(
-        label = "Agent notifications",
-        subtitle = if (granted) "On. Runs report back." else "Off. Runs stay silent.",
-        leading = {
-          Icon(Icons.Default.Notifications, contentDescription = null, tint = scheme.onSurface, modifier = Modifier.size(24.dp))
-        },
-        trailing = {
-          if (Build.VERSION.SDK_INT >= 33) {
-            Switch(
-              checked = granted,
-              onCheckedChange = { on ->
-                if (on) request.launch(Manifest.permission.POST_NOTIFICATIONS)
-                else {
-                  granted = false
-                  context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                    putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
-                  })
-                }
-              },
-            )
-          } else {
-            Text("System", fontSize = 14.sp, color = scheme.onSurfaceVariant)
-          }
-        },
-      )
-    }
-
-    item {
-      SpecSettingsRow(
-        label = "Read responses aloud",
-        subtitle = "Nova voice, on tap of any answer",
-        leading = {
-          Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, tint = scheme.onSurface, modifier = Modifier.size(24.dp))
-        },
-        trailing = {
-          Text("On tap", fontSize = 14.sp, color = scheme.onSurfaceVariant)
-        },
-      )
-    }
-
-    item { SpecSectionLabel("Appearance", modifier = Modifier.padding(top = 8.dp)) }
-
-    item {
-      // One Theme row, one picker — same pattern as every other setting
-      // (row + trailing affordance → menu). Was three rows all labelled
-      // "Appearance", which read as a broken duplicate list.
-      val currentMode = NovaThemeMode.entries.find {
-        it.name.equals(AccentPreferences.getThemeMode(context), ignoreCase = true)
-      } ?: NovaThemeMode.SYSTEM
-      val modeLabels = listOf(
-        NovaThemeMode.SYSTEM to "System (Default)",
-        NovaThemeMode.LIGHT to "Light",
-        NovaThemeMode.DARK to "Dark",
-      )
-      var themeMenu by remember { mutableStateOf(false) }
-      Box {
-        SpecSettingsRow(
-          label = "Theme",
-          subtitle = modeLabels.first { it.first == currentMode }.second,
-          onClick = { themeMenu = true },
-          leading = {
-            Icon(Icons.Default.DarkMode, contentDescription = null, tint = scheme.onSurface, modifier = Modifier.size(24.dp))
-          },
-          trailing = {
-            Icon(
-              Icons.AutoMirrored.Filled.KeyboardArrowRight,
-              contentDescription = null,
-              tint = scheme.onSurfaceVariant,
-              modifier = Modifier.size(20.dp),
-            )
-          },
-        )
-        DropdownMenu(expanded = themeMenu, onDismissRequest = { themeMenu = false }, containerColor = novaGlassFill()) {
-          modeLabels.forEach { (mode, label) ->
-            DropdownMenuItem(
-              text = { Text(label, color = if (mode == currentMode) scheme.primary else scheme.onSurface) },
-              trailingIcon = {
-                if (mode == currentMode) {
-                  Icon(Icons.Default.Check, contentDescription = "Selected", tint = scheme.primary, modifier = Modifier.size(20.dp))
-                }
-              },
-              onClick = {
-                themeMenu = false
-                AccentPreferences.setThemeMode(context, mode.name)
-                onPreferencesChanged()
-              },
-            )
-          }
-        }
-      }
-    }
-
-    item {
-      // Accent: one row showing the live swatch + name, same menu pattern.
-      val currentAccentName = AccentPreferences.get(context)
-      val currentAccent = NovaAccent.entries.find { it.name.equals(currentAccentName, ignoreCase = true) } ?: NovaAccent.PURPLE
-      var accentMenu by remember { mutableStateOf(false) }
-      Box {
-        SpecSettingsRow(
-          label = "Accent color",
-          subtitle = currentAccent.label,
-          onClick = { accentMenu = true },
-          leading = {
-            Box(
-              Modifier.size(16.dp).clip(CircleShape).background(novaAccentSwatch(currentAccent)),
-            )
-          },
-          trailing = {
-            Icon(
-              Icons.AutoMirrored.Filled.KeyboardArrowRight,
-              contentDescription = null,
-              tint = scheme.onSurfaceVariant,
-              modifier = Modifier.size(20.dp),
-            )
-          },
-        )
-        DropdownMenu(expanded = accentMenu, onDismissRequest = { accentMenu = false }, containerColor = novaGlassFill()) {
-          NovaAccent.entries.forEach { accent ->
-            DropdownMenuItem(
-              text = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                  Box(
-                    Modifier.size(16.dp).clip(CircleShape).background(novaAccentSwatch(accent)),
-                  )
-                  Spacer(Modifier.width(10.dp))
-                  Text(
-                    accent.label,
-                    color = if (accent == currentAccent) scheme.primary else scheme.onSurface,
-                  )
-                }
-              },
-              trailingIcon = {
-                if (accent == currentAccent) {
-                  Icon(Icons.Default.Check, contentDescription = "Selected", tint = scheme.primary, modifier = Modifier.size(20.dp))
-                }
-              },
-              onClick = {
-                accentMenu = false
-                AccentPreferences.set(context, accent.name)
-                onPreferencesChanged()
-              },
-            )
-          }
-        }
-      }
-    }
-
-    item { SpecSectionLabel("About", modifier = Modifier.padding(top = 8.dp)) }
-
-    item {
-      SpecSettingsRow(
-        label = "Nova",
-        subtitle = "v0.1.0. Voice, agents and ties into the tools you already use.",
-      )
-    }
-
-    item {
-      // Log out: full-width h56 glass r12, error icon + error label.
-      Surface(
-        onClick = { showSignOutConfirm = true },
-        shape = RoundedCornerShape(NovaRadius.md),
-        color = novaGlassFill(),
-        border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge()),
-        modifier = Modifier.fillMaxWidth().padding(top = 8.dp).semantics { role = Role.Button; contentDescription = "Log out" },
-      ) {
-        Row(
-          Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 16.dp, vertical = 12.dp),
-          verticalAlignment = Alignment.CenterVertically,
+        Column(
+          Modifier.weight(1f),
+          horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-          Icon(
-            Icons.AutoMirrored.Filled.Logout,
-            contentDescription = null,
-            tint = scheme.error,
-            modifier = Modifier.size(24.dp),
+          Text("Settings", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = scheme.onSurface)
+          Spacer(Modifier.height(2.dp))
+          Text("Account and preferences", fontSize = 14.sp, color = scheme.onSurfaceVariant, maxLines = 1)
+        }
+        Spacer(Modifier.size(MinTouchTarget))
+      }
+    }
+
+    item { SettingsSectionLabel("Account", Modifier.padding(top = NovaSpace.sm)) }
+    item {
+      SettingsGroup {
+        SettingsGroupRow(
+          label = accountEmail,
+          subtitle = if (hasEmail) "Your Nova account is active" else "Authenticated session",
+          leading = {
+            Surface(
+              modifier = Modifier.size(32.dp),
+              shape = CircleShape,
+              color = scheme.primaryContainer,
+              contentColor = scheme.onPrimaryContainer,
+            ) {
+              Box(contentAlignment = Alignment.Center) {
+                Text(initial, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+              }
+            }
+          },
+          trailing = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Icon(Icons.Default.Check, contentDescription = null, tint = scheme.secondary, modifier = Modifier.size(16.dp))
+              Spacer(Modifier.width(4.dp))
+              Text("Active", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = scheme.secondary)
+            }
+          },
+        )
+      }
+    }
+
+    item { SettingsSectionLabel("Accounts", Modifier.padding(top = NovaSpace.sm)) }
+    item {
+      SettingsGroup {
+        SettingsGroupRow(
+          label = "Connected accounts",
+          subtitle = "GitHub, Gmail, Calendar, Drive and more",
+          onClick = onConnectionsClick,
+          leading = {
+            Icon(Icons.Default.Link, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+          },
+          trailing = {
+            Icon(
+              Icons.AutoMirrored.Filled.KeyboardArrowRight,
+              contentDescription = null,
+              tint = scheme.onSurfaceVariant,
+              modifier = Modifier.size(20.dp),
+            )
+          },
+        )
+      }
+    }
+
+    item { SettingsSectionLabel("Notifications", Modifier.padding(top = NovaSpace.sm)) }
+    item {
+      SettingsGroup {
+        SettingsGroupRow(
+          label = "Agent notifications",
+          subtitle = if (granted) "Runs report back when you return" else "Runs stay silent",
+          leading = {
+            Icon(Icons.Default.Notifications, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+          },
+          trailing = {
+            if (Build.VERSION.SDK_INT >= 33) {
+              Switch(
+                checked = granted,
+                onCheckedChange = { on ->
+                  if (on) request.launch(Manifest.permission.POST_NOTIFICATIONS)
+                  else {
+                    granted = false
+                    context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                      putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    })
+                  }
+                },
+              )
+            } else {
+              Text("System", fontSize = 14.sp, color = scheme.onSurfaceVariant)
+            }
+          },
+        )
+        SettingsGroupDivider()
+        SettingsGroupRow(
+          label = "Read responses aloud",
+          subtitle = "Nova voice, on tap of any answer",
+          leading = {
+            Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+          },
+          trailing = {
+            Text("On tap", fontSize = 14.sp, color = scheme.onSurfaceVariant)
+          },
+        )
+      }
+    }
+
+    item { SettingsSectionLabel("Appearance", Modifier.padding(top = NovaSpace.sm)) }
+    item {
+      SettingsGroup {
+        Box {
+          SettingsGroupRow(
+            label = "Theme",
+            subtitle = modeLabels.first { it.first == currentMode }.second,
+            onClick = { themeMenu = true },
+            leading = {
+              Icon(Icons.Default.DarkMode, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+            },
+            trailing = {
+              Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = scheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+              )
+            },
           )
-          Spacer(Modifier.width(12.dp))
-          Text("Log out", fontSize = 16.sp, color = scheme.error)
+          DropdownMenu(
+            expanded = themeMenu,
+            onDismissRequest = { themeMenu = false },
+            containerColor = novaGlassFill(),
+          ) {
+            modeLabels.forEach { (mode, label) ->
+              DropdownMenuItem(
+                text = { Text(label, color = if (mode == currentMode) scheme.primary else scheme.onSurface) },
+                trailingIcon = {
+                  if (mode == currentMode) {
+                    Icon(Icons.Default.Check, contentDescription = "Selected", tint = scheme.primary, modifier = Modifier.size(20.dp))
+                  }
+                },
+                onClick = {
+                  themeMenu = false
+                  AccentPreferences.setThemeMode(context, mode.name)
+                  onPreferencesChanged()
+                },
+              )
+            }
+          }
+        }
+        SettingsGroupDivider()
+        Box {
+          SettingsGroupRow(
+            label = "Accent color",
+            subtitle = currentAccent.label,
+            onClick = { accentMenu = true },
+            leading = {
+              Box(Modifier.size(16.dp).clip(CircleShape).background(novaAccentSwatch(currentAccent)))
+            },
+            trailing = {
+              Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = scheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+              )
+            },
+          )
+          DropdownMenu(
+            expanded = accentMenu,
+            onDismissRequest = { accentMenu = false },
+            containerColor = novaGlassFill(),
+          ) {
+            NovaAccent.entries.forEach { accent ->
+              DropdownMenuItem(
+                text = {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(16.dp).clip(CircleShape).background(novaAccentSwatch(accent)))
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                      accent.label,
+                      color = if (accent == currentAccent) scheme.primary else scheme.onSurface,
+                    )
+                  }
+                },
+                trailingIcon = {
+                  if (accent == currentAccent) {
+                    Icon(Icons.Default.Check, contentDescription = "Selected", tint = scheme.primary, modifier = Modifier.size(20.dp))
+                  }
+                },
+                onClick = {
+                  accentMenu = false
+                  AccentPreferences.set(context, accent.name)
+                  onPreferencesChanged()
+                },
+              )
+            }
+          }
         }
       }
     }
+
+    item { SettingsSectionLabel("About", Modifier.padding(top = NovaSpace.sm)) }
+    item {
+      SettingsGroup {
+        SettingsGroupRow(
+          label = "Nova",
+          subtitle = "v0.1.0 · Voice, agents, and the tools you use",
+          leading = {
+            Icon(Icons.Default.Info, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+          },
+        )
+      }
+    }
+
+    item {
+      SettingsGroup {
+        SettingsGroupRow(
+          label = "Log out",
+          onClick = { showSignOutConfirm = true },
+          labelColor = scheme.error,
+          leading = {
+            Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = scheme.error, modifier = Modifier.size(22.dp))
+          },
+        )
+      }
+    }
+  }
   }
 
   if (showSignOutConfirm) {

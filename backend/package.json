@@ -8,7 +8,7 @@
     "postinstall": "prisma generate",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node --env-file-if-exists=.env dist/index.js",
-    "test": "tsx src/tools/Tool.test.ts && tsx src/auth.test.ts && tsx src/services/fileService.test.ts && tsx src/services/chatPlugins.test.ts && tsx src/agent/runtime.test.ts && tsx src/browser/browserPolicy.test.ts && tsx src/browser/browserTaskStore.test.ts && tsx src/browser/browserTools.test.ts && tsx src/ui/UiBlocks.test.ts"
+    "test": "tsx src/tools/Tool.test.ts && tsx src/auth.test.ts && tsx src/services/fileService.test.ts && tsx src/services/chatPlugins.test.ts && tsx src/ai/models.test.ts && tsx src/ai/GeminiProvider.test.ts && tsx src/ai/OpenAIProvider.test.ts && tsx src/services/chatService.test.ts && tsx src/agent/builder.test.ts && tsx src/agent/runtime.test.ts && tsx src/browser/browserPolicy.test.ts && tsx src/browser/browserTaskStore.test.ts && tsx src/browser/browserTools.test.ts && tsx src/ui/UiBlocks.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",

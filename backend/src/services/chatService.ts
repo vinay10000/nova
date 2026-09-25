@@ -1,7 +1,7 @@
 import type { AIProvider, ChatMessage, InlinePart, StreamChunk } from '../ai/AIProvider.js';
 import type { PrismaClient } from '@prisma/client';
 import { detectPlugin, pluginToolDefs, executePluginTool, MAX_PLUGIN_STEPS, connectedProviders, isPluginUsable, type ChatPlugin } from './chatPlugins.js';
-import { MODELS } from '../ai/models.js';
+import { MODELS, type ModelEffort } from '../ai/models.js';
 import { uiBlocksFromToolResult, blocksFromPresentUiInput, presentUiParamsSchema, type UiBlock } from '../ui/UiBlocks.js';
 
 /** §45 generative UI: the model calls this instead of printing UI JSON in prose. */
@@ -43,6 +43,7 @@ export interface StreamOptions {
   userId: string;
   message: string;
   model?: string;
+  effort?: ModelEffort;
   signal?: AbortSignal;
   /** §10 attachment ids uploaded via /v1/files, attached to this user message. */
   attachmentIds?: string[];
@@ -53,7 +54,7 @@ export interface StreamOptions {
 export function createChatService(ai: AIProvider, store: ChatStore, attachments?: AttachmentSource, db?: PrismaClient) {
   return {
     async *stream(opts: StreamOptions): AsyncGenerator<StreamChunk> {
-      const { conversationId, userId, message, model, signal } = opts;
+      const { conversationId, userId, message, model, effort, signal } = opts;
       signal?.throwIfAborted?.();
       // history first, so the model sees the full conversation (backend is the source of truth).
       const history = await store.loadMessages(conversationId, userId);
@@ -155,6 +156,7 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
           signal,
           attachments: inlineParts,
           extractedText,
+          ...(effort ? { effort } : {}),
         };
         if (previousInteractionId) streamOpts.previousInteractionId = previousInteractionId;
         streamOpts.tools = chatToolDefs;
@@ -168,7 +170,9 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
         for await (const chunk of ai.streamChat(loopMessages, streamOpts as Parameters<AIProvider['streamChat']>[1])) {
           if (signal?.aborted) break;
 
-          if (chunk.type === 'token') {
+          if (chunk.type === 'reasoning') {
+            yield chunk;
+          } else if (chunk.type === 'token') {
             full += chunk.text;
             yield chunk;
           } else if (chunk.type === 'tool_call' && chunk.toolId) {

@@ -1,9 +1,10 @@
 import { GoogleGenAI } from '@google/genai';
-import type { AIProvider, ChatMessage, InlinePart, StreamChunk, ToolDef } from './AIProvider.js';
+import type { AIProvider, ChatMessage, InlinePart, StreamChatOptions, StreamChunk, ToolDef } from './AIProvider.js';
 
-import { MODELS } from './models.js';
+import { MODELS, resolveModelEffort } from './models.js';
 
 export { MODELS };
+export type { FunctionResultInput } from './AIProvider.js';
 
 // Model policy: ONLY two models. gemini-3.1-flash-lite default; gemini-3.5-flash-lite
 // for tool calling and vision (see OpenAIProvider MODELS).
@@ -13,9 +14,12 @@ export { MODELS };
 export class GeminiProvider implements AIProvider {
   private client: GoogleGenAI;
 
-  constructor(apiKey = process.env.GEMINI_API_KEY ?? process.env.AI_API_KEY ?? '') {
+  constructor(
+    apiKey = process.env.GEMINI_API_KEY ?? process.env.AI_API_KEY ?? '',
+    client?: GoogleGenAI,
+  ) {
     if (!apiKey) console.warn('[gemini] GEMINI_API_KEY missing — chat fails until set server-side.');
-    this.client = new GoogleGenAI({ apiKey });
+    this.client = client ?? new GoogleGenAI({ apiKey });
   }
 
   /**
@@ -46,28 +50,25 @@ export class GeminiProvider implements AIProvider {
     opts?: StreamChatOptions,
   ): AsyncGenerator<StreamChunk> {
     opts?.signal?.throwIfAborted?.();
-    const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
-    const turns = messages.filter((m) => m.role !== 'system');
 
     // Guard against stale model ids saved by older clients — only the two
     // Gemini models in the registry pass.
     const allowed = new Set<string>(Object.values(MODELS));
     const model = opts?.model && allowed.has(opts.model) ? opts.model : MODELS.chat;
-    const stream = (await this.client.interactions.create({
-      model,
-      input: opts?.functionResults?.length
-        ? (opts.functionResults as unknown as Array<Record<string, unknown>>)
-        : (buildInput(turns, opts?.attachments, opts?.extractedText) as string),
-      ...(opts?.previousInteractionId ? { previous_interaction_id: opts.previousInteractionId } : {}),
-      ...(system ? { system_instruction: system } : {}),
-      ...(opts?.tools?.length ? { tools: opts.tools.map(toToolDef) } : {}),
-      store: true, // required for previous_interaction_id chaining
-      stream: true,
-    } as Parameters<typeof this.client.interactions.create>[0])) as AsyncIterable<{
+    const request = buildInteractionRequest(messages, opts, model);
+    const stream = (await this.client.interactions.create(
+      request as Parameters<typeof this.client.interactions.create>[0],
+    )) as AsyncIterable<{
       event_type: string;
       index?: number;
-      delta?: { type: string; text?: string; arguments?: string };
-      step?: { type: string; name?: string; id?: string; arguments?: unknown };
+      delta?: { type: string; text?: string; arguments?: string; content?: { text?: string } };
+      step?: {
+        type: string;
+        name?: string;
+        id?: string;
+        arguments?: unknown;
+        summary?: Array<{ type?: string; text?: string }>;
+      };
       interaction?: { id?: string };
       interaction_id?: string;
     }>;
@@ -77,6 +78,22 @@ export class GeminiProvider implements AIProvider {
     let pending: { index?: number; id: string; name: string; argsText: string } | null = null;
     let interactionId: string | undefined;
     let sawDone = false;
+    let reasoningText = '';
+    const takeReasoning = (text: string | undefined): string | undefined => {
+      if (!text) return undefined;
+      if (!reasoningText) {
+        reasoningText = text;
+        return text;
+      }
+      if (reasoningText.endsWith(text)) return undefined;
+      if (text.startsWith(reasoningText)) {
+        const addition = text.slice(reasoningText.length);
+        reasoningText = text;
+        return addition || undefined;
+      }
+      reasoningText += text;
+      return text;
+    };
     const flush = function* (): Generator<StreamChunk> {
       if (pending) {
         let args: unknown = {};
@@ -97,6 +114,16 @@ export class GeminiProvider implements AIProvider {
         throw new Error(`gemini_stream_error: ${JSON.stringify(evt.error ?? evt.message ?? evt).slice(0, 300)}`);
       }
       interactionId = event.interaction?.id ?? event.interaction_id ?? interactionId;
+      if (event.event_type === 'step.start' && event.step?.type === 'thought') {
+        for (const part of event.step.summary ?? []) {
+          const addition = takeReasoning(part.text);
+          if (addition) yield { type: 'reasoning', text: addition };
+        }
+      }
+      if (event.event_type === 'step.delta' && event.delta?.type === 'thought_summary') {
+        const addition = takeReasoning(event.delta.content?.text ?? event.delta.text);
+        if (addition) yield { type: 'reasoning', text: addition };
+      }
       if (event.event_type === 'step.delta' && (event.delta?.type === 'text' || event.delta?.type === 'text_delta') && event.delta.text) {
         yield { type: 'token', text: event.delta.text };
       }
@@ -145,10 +172,10 @@ export class GeminiProvider implements AIProvider {
           model,
           input: prompt,
           response_format: { type: 'text', mime_type: 'application/json' },
-        });
+        }, { timeout_ms: 12_000, retries: { strategy: 'none' } });
         return parseJson(outputText(res), { error: 'unparseable' });
       } catch (err) {
-        if (model === MODELS.cheap || !(err instanceof Error && /429|quota|rate/i.test(err.message))) throw err;
+        if (model === MODELS.cheap || !isTransientGeminiError(err)) throw err;
       }
     }
     throw new Error('unreachable');
@@ -164,29 +191,34 @@ export class GeminiProvider implements AIProvider {
   }
 }
 
-export interface FunctionResultInput {
-  type: 'function_result';
-  name: string;
-  call_id: string;
-  result: string;
-  is_error?: boolean;
+export function buildInteractionRequest(
+  messages: ChatMessage[],
+  opts: StreamChatOptions | undefined,
+  model: string,
+): Record<string, unknown> {
+  const system = messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n');
+  const turns = messages.filter((message) => message.role !== 'system');
+  const effort = resolveModelEffort(opts?.effort);
+  return {
+    model,
+    input: opts?.functionResults?.length
+      ? (opts.functionResults as unknown as Array<Record<string, unknown>>)
+      : buildInput(turns, opts?.attachments, opts?.extractedText),
+    ...(opts?.previousInteractionId ? { previous_interaction_id: opts.previousInteractionId } : {}),
+    ...(system ? { system_instruction: system } : {}),
+    ...(opts?.tools?.length ? { tools: opts.tools.map(toToolDef) } : {}),
+    generation_config: {
+      ...(effort ? { thinking_level: effort } : {}),
+      thinking_summaries: 'auto',
+    },
+    store: true,
+    stream: true,
+  };
 }
 
-interface StreamChatOptions {
-  model?: string;
-  tools?: ToolDef[];
-  previousInteractionId?: string;
-  functionResults?: FunctionResultInput[];
-  signal?: AbortSignal;
-  /** §9 inline image/document parts on the last user turn. */
-  attachments?: InlinePart[];
-  /** §9 server-side extracted document text. */
-  extractedText?: string;
-}
-
-function isTransientGeminiError(err: unknown): boolean {
+export function isTransientGeminiError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
-  return /429|500|502|503|504|high demand|temporarily unavailable|rate.?limit|quota/i.test(message);
+  return /429|500|502|503|504|timeout|timed out|deadline|high demand|temporarily unavailable|rate.?limit|quota/i.test(message);
 }
 
 /**

@@ -15,6 +15,7 @@ android {
     targetSdk = 36
     versionCode = 1
     versionName = "0.1.0"
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
   signingConfigs.create("sandboxDebug") {
     // The default ~/.android keystore is not writable in this sandbox; keep it in-repo.
@@ -83,4 +84,9 @@ dependencies {
   implementation(libs.markdown.renderer.m3)
   implementation(libs.markdown.renderer.code)
   implementation(libs.markdown.renderer.coil3)
+
+  testImplementation("junit:junit:4.13.2")
+
+  androidTestImplementation("androidx.test:runner:1.7.0")
+  androidTestImplementation("androidx.test.ext:junit:1.3.0")
 }

@@ -1,4 +1,7 @@
 // §2 — AI provider abstraction. Backend owns keys; APK never sees them (§46).
+import type { ModelEffort } from './models.js';
+import type { UiBlock } from '../ui/UiBlocks.js';
+
 export interface ChatMessage {
   role: 'user' | 'model' | 'system' | 'assistant' | 'tool';
   content: string | null;
@@ -33,23 +36,30 @@ export interface ToolDef {
   parameters: unknown;
 }
 
+export interface FunctionResultInput {
+  type: 'function_result';
+  name: string;
+  call_id: string;
+  result: string;
+  is_error?: boolean;
+}
+
+export interface StreamChatOptions {
+  model?: string;
+  effort?: ModelEffort;
+  tools?: ToolDef[];
+  previousInteractionId?: string;
+  /** Turn 2+ of a tool loop: results fed back into the same interaction. */
+  functionResults?: FunctionResultInput[];
+  signal?: AbortSignal;
+  /** §9: inline image/document parts attached to the last user message. */
+  attachments?: InlinePart[];
+  /** §9: server-side extracted text (TXT/CSV/DOCX) prepended to the turn. */
+  extractedText?: string;
+}
+
 export interface AIProvider {
-  streamChat(
-    messages: ChatMessage[],
-    opts?: {
-      model?: string;
-      tools?: ToolDef[];
-      previousInteractionId?: string;
-      /** Turn 2+ of a tool loop: results fed back into the same interaction. */
-      functionResults?: { type: 'function_result'; name: string; call_id: string; result: string; is_error?: boolean }[];
-      signal?: AbortSignal;
-      /** §9: inline image/document parts attached to the last user message. */
-      attachments?: InlinePart[];
-      /** §9: server-side extracted text (TXT/CSV/DOCX) prepended to the turn. */
-      extractedText?: string;
-    },
-  ): AsyncGenerator<StreamChunk>; // §3, §6 must stream progressively
+  streamChat(messages: ChatMessage[], opts?: StreamChatOptions): AsyncGenerator<StreamChunk>; // §3, §6 must stream progressively
   generateAgentConfig(naturalLanguage: string, knownTools?: string[]): Promise<unknown>; // §12-§14 conversational builder
   titleFor(firstUserMessage: string): Promise<string>; // §8 auto-title
 }
-import type { UiBlock } from '../ui/UiBlocks.js';

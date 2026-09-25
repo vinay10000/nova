@@ -47,10 +47,8 @@ import com.nova.app.data.createNovaApi
 import kotlin.math.abs
 
 /**
- * App shell. §5 top-level destinations live in a floating pill bar over a
- * solid bottom floor — the floor stops scroll content bleeding through the
- * pill's margins and the navigation inset. Screens read [LocalBottomChrome]
- * for bottom clearance.
+ * App shell. §5 top-level destinations live in a floating pill bar over the
+ * current screen. Screens read [LocalBottomChrome] for bottom clearance.
  *
  * Navigation rules kept here so screens never touch the controller:
  *   - Tab tap  : single instance, per-tab state saved and restored.
@@ -63,6 +61,11 @@ private data class NovaTab(val route: String, val label: String, val icon: Image
 
 /** Routes that are children of a tab: the bar stays as the way out. */
 private val childRoutes = mapOf("allchats" to "chat", "connections" to "settings")
+
+internal fun shouldHandleTabBack(route: String?, tabRoutes: Set<String>, imeVisible: Boolean): Boolean =
+  !imeVisible && route != null && route != "chat" && route in tabRoutes
+
+internal fun shouldShowBottomBar(imeVisible: Boolean, drawerOpen: Boolean): Boolean = !imeVisible && !drawerOpen
 
 /** Floating pill geometry — screens reserve this via LocalBottomChrome. */
 private val TabBarHeight = 42.dp
@@ -84,6 +87,7 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
   val chatVm: ChatViewModel = viewModel()
   var authenticated by remember { mutableStateOf(session.get() != null) }
   var agentBuilderSeed by remember { mutableStateOf<String?>(null) }
+  var drawerOpen by remember { mutableStateOf(false) }
   if (!authenticated) {
     // Logged-out chrome is zero: no bar, no clearance. Status bar still cleared.
     CompositionLocalProvider(LocalBottomChrome provides 0.dp) {
@@ -120,7 +124,7 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
   }
   val backStackEntry by nav.currentBackStackEntryAsState()
   val route = backStackEntry?.destination?.route
-  val tabRoutes = tabs.map { it.route }
+  val tabRoutes = tabs.mapTo(mutableSetOf()) { it.route }
   val selectedTab = when {
     route == null -> "chat"
     route in tabRoutes -> route
@@ -130,7 +134,7 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
   // own the whole bottom inset instead of stacking two paddings.
   val density = LocalDensity.current
   val imeVisible = WindowInsets.ime.getBottom(density) > 0
-  val showBar = !imeVisible
+  val showBar = shouldShowBottomBar(imeVisible, drawerOpen)
 
   // Clearance for scroll content under the floating bar (bar + margin + nav inset).
   val navBars = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
@@ -153,7 +157,7 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
 
   // Back from a secondary tab lands on Chat first — the standard Android
   // bottom-nav contract, and cheaper than killing the app.
-  BackHandler(enabled = route != null && route != "chat" && route in tabRoutes) {
+  BackHandler(enabled = shouldHandleTabBack(route, tabRoutes, imeVisible)) {
     nav.navigate("chat") {
       popUpTo("chat") { saveState = true }
       launchSingleTop = true
@@ -163,7 +167,7 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
 
   CompositionLocalProvider(LocalBottomChrome provides bottomChrome) {
     Box(Modifier.fillMaxSize()) {
-      // Screens content. The floor strip and pill bar sit as siblings above.
+      // Screens content. The pill bar sits above it.
       Box(
         Modifier
           .fillMaxSize()
@@ -182,6 +186,7 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
 
               onActivityClick = { goToTab("activity") },
               onAllChatsClick = { nav.navigate("allchats") { launchSingleTop = true } },
+              onDrawerOpenChanged = { drawerOpen = it },
               vm = chatVm,
             )
           }
@@ -214,18 +219,6 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
             )
           }
         }
-      }
-
-      // Solid floor under the pill: covers the bar band + nav inset so list
-      // content scrolling behind the floating bar never shows in its margins.
-      if (showBar) {
-        Box(
-          Modifier
-            .align(Alignment.BottomCenter)
-            .fillMaxWidth()
-            .height(bottomChrome)
-            .background(if (novaDark()) NovaAmbient.BottomDark else NovaAmbient.BottomLight),
-        )
       }
 
       AnimatedVisibility(
