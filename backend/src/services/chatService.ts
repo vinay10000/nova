@@ -3,6 +3,7 @@ import type { PrismaClient } from '@prisma/client';
 import { detectPlugin, pluginToolDefs, executePluginTool, MAX_PLUGIN_STEPS, connectedProviders, isPluginUsable, type ChatPlugin } from './chatPlugins.js';
 import { MODELS, type ModelEffort } from '../ai/models.js';
 import { uiBlocksFromToolResult, blocksFromPresentUiInput, presentUiParamsSchema, type UiBlock } from '../ui/UiBlocks.js';
+import { envelopesFromSurfaceInput } from '../ui/A2ui.js';
 
 /** §45 generative UI: the model calls this instead of printing UI JSON in prose. */
 const PRESENT_UI_DEF = {
@@ -16,6 +17,115 @@ const PRESENT_UI_DEF = {
     'Titles are short noun phrases (about 6 words, sentence case). ' +
     'NEVER print UI JSON in your text answer — call this tool instead.',
   parameters: presentUiParamsSchema,
+};
+
+/**
+ * §45b generative UI: a live surface, not a set of cards.
+ *
+ * present_ui is for data the user asked to see laid out. present_surface is for
+ * a moment the app itself has to own — a trip being assembled, a day filling up,
+ * a checklist the user can tick, a purchase waiting on a yes. Its cards are
+ * stateful: they can stream, they can be edited, and their buttons report back.
+ *
+ * Prefer present_surface when the answer has a shape (a trip, an agenda, a
+ * receipt). Prefer present_ui when the answer is a table of numbers. Never call
+ * both for the same content.
+ */
+const PRESENT_SURFACE_DEF = {
+  name: 'present_surface',
+  description:
+    'Render a live, interactive surface under your reply. Use it when the answer has a SHAPE — a trip, a place to stay, ' +
+    'a day of plans, a tickable checklist, weather, or a purchase awaiting confirmation — rather than a table of numbers. ' +
+    'Each card is a native component: it can fill in progressively, the user can tick a checklist, and its buttons ' +
+    'send an action back to you. ' +
+    'Kinds: trip (destination + dates + flight) · stay (name, address, check-in/out, photo) · weather (now, high/low, hours) · ' +
+    'agenda (a day of timed entries) · checklist (tickable items, set done:true/false for what is already handled) · ' +
+    'approval (a purchase waiting on the user) · actions (suggested next steps as buttons). ' +
+    'Put prose, caveats and refusals in your text answer, never in a card. ' +
+    'For actions, each prompt needs a short label and an action name you will listen for. ' +
+    'For approval, set confirmName/declineName to the action names you will handle. ' +
+    'NEVER print surface JSON in your text answer — call this tool instead.',
+  parameters: {
+    type: 'object',
+    properties: {
+      cards: {
+        type: 'array',
+        description: '1-8 cards, in the order they should read top to bottom',
+        items: {
+          type: 'object',
+          properties: {
+            kind: {
+              type: 'string',
+              enum: ['trip', 'stay', 'weather', 'agenda', 'checklist', 'approval', 'actions'],
+            },
+            eyebrow: { type: 'string', description: 'Small label above the card, e.g. "Your trip"' },
+            destination: { type: 'string', description: 'trip: where to' },
+            dates: { type: 'string', description: 'trip: date range, e.g. "Jun 3 – Jun 9"' },
+            leg: { type: 'string', description: 'trip: the flight or leg, e.g. "Flight MU7 · departs 11:20"' },
+            legStatus: { type: 'string', description: 'trip: short status such as "On time"' },
+            note: { type: 'string', description: 'trip or checklist: one quiet line of context' },
+            name: { type: 'string', description: 'stay: the property or hotel name' },
+            address: { type: 'string', description: 'stay: neighbourhood and floor' },
+            checkIn: { type: 'string', description: 'stay: check-in date and time' },
+            checkOut: { type: 'string', description: 'stay: check-out date and time' },
+            imageUrl: { type: 'string', description: 'stay: https photo of the place' },
+            place: { type: 'string', description: 'weather: the city' },
+            now: { type: 'string', description: 'weather: current temperature with degree, e.g. "22°"' },
+            condition: { type: 'string', description: 'weather: e.g. "Partly cloudy"' },
+            high: { type: 'string', description: 'weather: high, e.g. "24°"' },
+            low: { type: 'string', description: 'weather: low, e.g. "17°"' },
+            precip: { type: 'string', description: 'weather: chance of rain, e.g. "30%"' },
+            wind: { type: 'string', description: 'weather: e.g. "Light breeze"' },
+            hours: {
+              type: 'array',
+              description: 'weather: the next few hours (max 8)',
+              items: { type: 'object', properties: { label: { type: 'string' }, temp: { type: 'string' } }, required: ['label', 'temp'] },
+            },
+            heading: { type: 'string', description: 'agenda: the day, e.g. "Thursday, Jun 4"' },
+            events: {
+              type: 'array',
+              description: 'agenda: timed entries (max 12)',
+              items: { type: 'object', properties: { time: { type: 'string' }, title: { type: 'string' }, place: { type: 'string' } }, required: ['time', 'title'] },
+            },
+            items: { type: 'array', items: { type: 'string' }, description: 'checklist: the rows to tick (max 20)' },
+            done: {
+              type: 'array',
+              items: { type: 'boolean' },
+              description:
+                'checklist: same length as items. Supply this ONLY when the user has already handled some rows — it makes the ' +
+                'list two-way, so their ticks come back to you. Omit it and the list is read-only.',
+            },
+            provider: { type: 'string', description: 'approval: who is charging' },
+            summary: { type: 'string', description: 'approval: what is being bought, e.g. "Airport pickup · Haneda → Kanda House"' },
+            amount: { type: 'string', description: 'approval: the amount, e.g. "¥6,800"' },
+            instrument: { type: 'string', description: 'approval: the card, e.g. "Visa ···· 4342"' },
+            state: {
+              type: 'string',
+              enum: ['pending', 'verifying', 'approved', 'declined'],
+              description: 'approval: the flow state. Start at pending.',
+            },
+            confirmName: { type: 'string', description: 'approval: action name you handle when the user confirms' },
+            declineName: { type: 'string', description: 'approval: action name you handle when the user declines' },
+            prompts: {
+              type: 'array',
+              description: 'actions: suggested next steps (max 4)',
+              items: {
+                type: 'object',
+                properties: {
+                  label: { type: 'string', description: 'What the button says' },
+                  name: { type: 'string', description: 'Action name you will handle when tapped' },
+                  context: { type: 'object', additionalProperties: true, description: 'Extra values to send with the action' },
+                },
+                required: ['label', 'name'],
+              },
+            },
+          },
+          required: ['kind'],
+        },
+      },
+    },
+    required: ['cards'],
+  } as const,
 };
 
 export interface ChatStore {
@@ -113,21 +223,26 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
         { role: 'user' as const, content: userQuery },
       ];
 
-      // If a plugin is active, add system instruction and tools. present_ui rides on
+      // If a plugin is active, add system instruction and tools. The two UI tools ride on
       // every chat (plugin or not) so "show me a dashboard" never degrades to prose JSON.
       const pluginTools = activePlugin ? pluginToolDefs(activePlugin) : undefined;
-      const chatToolDefs = [...(pluginTools ?? []), PRESENT_UI_DEF];
+      const chatToolDefs = [...(pluginTools ?? []), PRESENT_UI_DEF, PRESENT_SURFACE_DEF];
       const UI_HINT =
-        'The app renders tool results and present_ui calls as rich UI cards automatically. ' +
-        'Answer in plain prose. NEVER print raw JSON or a code block describing a UI — call present_ui instead. ' +
-        'Cards are for structured facts: metrics for numbers, list for items, table for rows, progress for percent goals ' +
+        'The app renders tool results, present_ui cards and present_surface components as real UI automatically. ' +
+        'Answer in plain prose. NEVER print raw JSON or a code block describing a UI — call present_ui or present_surface instead. ' +
+        'present_ui is for data: metrics for numbers, list for items, table for rows, progress for percent goals ' +
         '(0-100), timeline for status steps, comparison for two-sided choices, code for source, chart for series, ' +
         'links for openable URLs, summary for a short factual overview with key/value metadata (under 600 characters). ' +
+        'present_surface is for an answer with a SHAPE: a trip, a place to stay, a day of plans, a tickable checklist, ' +
+        'weather, a purchase awaiting confirmation, or suggested next steps. Its buttons come back to you as actions, ' +
+        'so name them ("add_packing_list", "confirm_ride") and react to them. ' +
         'Refusals, apologies and limitations stay in prose.';
       const systemMessage = activePlugin ? `${activePlugin.systemInstruction} ${UI_HINT}` : UI_HINT;
 
       let full = '';
       let uiBlocks: UiBlock[] = [];
+      // §45b: one server-owned id per turn. The model never sees or sets it.
+      const surfaceId = `s_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
       let toolSteps = 0;
       // Gemini's Interactions API requires the interaction that produced a
       // function call on the next function_result request. Keep it across the
@@ -203,7 +318,7 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
         }
 
         // Execute tool calls and prepare results for the next turn.
-        // present_ui is local (no DB needed) — validate + emit blocks immediately.
+        // present_ui and present_surface are local (no DB needed) — validate + emit immediately.
         {
           const results: { type: 'function_result'; name: string; call_id: string; result: string; is_error?: boolean }[] = [];
           for (const tc of toolCalls) {
@@ -215,6 +330,24 @@ export function createChatService(ai: AIProvider, store: ChatStore, attachments?
                 results.push({ type: 'function_result', name: tc.toolId, call_id: tc.callId, result: JSON.stringify({ rendered: blocks.length }) });
               } else {
                 results.push({ type: 'function_result', name: tc.toolId, call_id: tc.callId, result: 'invalid blocks — check the schema and retry with valid types', is_error: true });
+              }
+              continue;
+            }
+            if (tc.toolId === 'present_surface') {
+              // One surface per turn. The id is server-owned, so two surfaces in
+              // one turn could not be told apart by the client.
+              const frames = envelopesFromSurfaceInput(tc.args, surfaceId);
+              if (frames.length) {
+                for (const frame of frames) yield { type: 'a2ui', frame };
+                const componentCount = ((frames[1]?.updateComponents as { components?: unknown[] } | undefined)?.components?.length) ?? 0;
+                results.push({
+                  type: 'function_result',
+                  name: tc.toolId,
+                  call_id: tc.callId,
+                  result: JSON.stringify({ rendered: componentCount, surfaceId }),
+                });
+              } else {
+                results.push({ type: 'function_result', name: tc.toolId, call_id: tc.callId, result: 'invalid cards — check the schema and retry with valid kinds', is_error: true });
               }
               continue;
             }

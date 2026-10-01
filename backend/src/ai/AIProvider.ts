@@ -27,6 +27,13 @@ export type StreamChunk =
   | { type: 'notice'; code: 'reconnect' | 'retry' | 'plugin'; provider?: string; message?: string }
   | { type: 'approval'; approvalId: string; toolId: string; payload: unknown }
   | { type: 'ui'; blocks: UiBlock[] }
+  /**
+   * One A2UI protocol frame (§45b). A surface arrives as three frames in order —
+   * createSurface, updateComponents, updateDataModel — and the client assembles
+   * them. The frame is the object itself, not a string, so nothing downstream
+   * has to re-parse JSON the server already built.
+   */
+  | { type: 'a2ui'; frame: Record<string, unknown> }
   | { type: 'error'; code: string; message?: string; retryable?: boolean }
   | { type: 'done'; interactionId?: string };
 

@@ -17,6 +17,9 @@ retrofit = "3.0.0"
 okhttp = "5.4.0"
 coil = "3.5.0"
 markdownRenderer = "0.45.0"
+# A2UI (agent-to-UI) renderer. Only alpha01 exists; protocol v0.9.1. The artifacts
+# target compileSdk 37.1 and pull lifecycle-runtime 2.10.0 (Gradle upgrades 2.9.4).
+a2ui = "1.0.0-alpha01"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -35,6 +38,9 @@ compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview"
 compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 compose-material3 = { module = "androidx.compose.material3:material3" }
 compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended", version = "1.7.8" }
+# Compose UI test harness, for asserting on what an A2UI surface actually draws.
+compose-ui-test-junit4 = { module = "androidx.compose.ui:ui-test-junit4" }
+compose-ui-test-manifest = { module = "androidx.compose.ui:ui-test-manifest" }
 
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
@@ -46,6 +52,13 @@ coil-compose = { module = "io.coil-kt.coil3:coil-compose", version.ref = "coil" 
 markdown-renderer-m3 = { module = "com.mikepenz:multiplatform-markdown-renderer-m3", version.ref = "markdownRenderer" }
 markdown-renderer-code = { module = "com.mikepenz:multiplatform-markdown-renderer-code", version.ref = "markdownRenderer" }
 markdown-renderer-coil3 = { module = "com.mikepenz:multiplatform-markdown-renderer-coil3", version.ref = "markdownRenderer" }
+
+# Agent-to-UI (A2UI). Layers: a2ui-model + a2ui-engine arrive transitively, but are
+# declared so the protocol types we import are a direct, visible dependency.
+a2ui-compose-runtime = { module = "androidx.a2ui.compose:compose-runtime", version.ref = "a2ui" }
+a2ui-compose-ui = { module = "androidx.a2ui.compose:compose-ui", version.ref = "a2ui" }
+a2ui-material3 = { module = "androidx.compose.material3:material3-a2ui", version.ref = "a2ui" }
+a2ui-compose-ui-testing = { module = "androidx.a2ui.compose:compose-ui-testing", version.ref = "a2ui" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

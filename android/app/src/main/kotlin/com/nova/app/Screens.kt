@@ -7,6 +7,7 @@ import android.os.Build
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import coil3.compose.AsyncImage
 import androidx.compose.animation.core.*
@@ -134,6 +135,15 @@ import com.nova.app.data.ModelDto
 import com.nova.app.data.NovaApi
 import com.nova.app.data.SessionToken
 import com.nova.app.data.UiBlockDto
+import com.nova.app.a2ui.A2uiSurfaceRow
+import com.nova.app.a2ui.NovaA2uiController
+import com.nova.app.a2ui.SurfaceAction
+import com.nova.app.a2ui.start
+import com.nova.app.a2ui.toSurfaceAction
+import androidx.a2ui.model.protocol.A2uiClientEventMessage
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import com.nova.app.voice.AndroidVoiceInput
 import com.nova.app.voice.RemoteVoiceOutput
 import com.nova.app.voice.VoiceOutput
@@ -300,7 +310,25 @@ fun LoginScreen(api: NovaApi, onAuthenticated: (String) -> Unit) {
 
 // §8 entities (backend-owned; Room cache mirrors these).
 @kotlinx.serialization.Serializable
-data class Message(val id: String = "", val role: String, val content: String, val attachments: List<com.nova.app.data.AttachmentInfo> = emptyList(), val reasoning: String = "", val ui: List<UiBlockDto> = emptyList(), val createdAt: String? = null)
+data class Message(val id: String = "", val role: String, val content: String, val attachments: List<com.nova.app.data.AttachmentInfo> = emptyList(), val reasoning: String = "", val ui: List<UiBlockDto> = emptyList(), val createdAt: String? = null, /**
+   * §45b: A2UI surface ids this turn produced, in arrival order.
+   *
+   * The surface models themselves live in the controller — they are mutable
+   * state, not transcript data, and a data class field would fight the engine's
+   * snapshot updates. Only the ids are recorded, so a surface renders in the
+   * turn that created it and scrolls with it.
+   */
+  val surfaces: List<String> = emptyList())
+
+/**
+ * Whether this turn carries anything worth showing.
+ *
+ * A surface counts. "Show me my trip" can produce a trip card and no prose at
+ * all, and a guard that only looked at text would throw that whole answer away —
+ * the user would see the app think and then say nothing.
+ */
+fun Message.hasContent(): Boolean =
+  content.isNotEmpty() || ui.isNotEmpty() || reasoning.isNotEmpty() || surfaces.isNotEmpty()
 @kotlinx.serialization.Serializable
 data class Agent(val id: String = "", val name: String, val goal: String, val status: String = "draft")
 
@@ -348,6 +376,33 @@ class ChatViewModel(
   val pending: StateFlow<List<PendingAttachment>> = _pending.asStateFlow()
   private val _uploading = MutableStateFlow(false)
   val uploading: StateFlow<Boolean> = _uploading.asStateFlow()
+
+  /**
+   * §45b: the A2UI data layer.
+   *
+   * One controller per conversation, owned here rather than in a composable, so
+   * a surface survives rotation and a config change cannot orphan the engine's
+   * data model. Its outbound action events are pumped into [surfaceActions] so
+   * the chat screen can react without knowing anything about the protocol.
+   */
+  val a2ui = NovaA2uiController()
+
+  /** A user action from a generated surface, as something the composer can say. */
+  private val _surfaceActions = MutableSharedFlow<SurfaceAction>(extraBufferCapacity = 8)
+  val surfaceActions: SharedFlow<SurfaceAction> = _surfaceActions.asSharedFlow()
+
+  init {
+    // Started once, for the life of the conversation. The controller owns the
+    // engine; this only relays whatever the engine emits.
+    a2ui.start(viewModelScope) { message ->
+      // The engine emits two things: a user action, and a data-model write-back
+      // (a ticked checklist, which the agent needs but the user does not). Only
+      // the first becomes a composer suggestion.
+      if (message is A2uiClientEventMessage) {
+        message.toSurfaceAction()?.let { _surfaceActions.emit(it) }
+      }
+    }
+  }
 
   fun configureApi(api: NovaApi) {
     if (configuredApi === api) return
@@ -453,6 +508,18 @@ class ChatViewModel(
               val cur = _streamingMsg.value ?: return@collect
               _streamingMsg.value = cur.copy(ui = (cur.ui + chunk.blocks).distinctBy { it.id }.take(8))
             }
+            "a2ui" -> {
+              // §45b: the frame goes straight to the engine; we only record
+              // which surface it belongs to so the turn can render it. A frame
+              // the engine rejects is dropped here, and the turn keeps whatever
+              // prose came before it — a bad card must not cost the answer.
+              val raw = chunk.frame ?: return@collect
+              val surfaceId = a2ui.submit(raw) ?: return@collect
+              val cur = _streamingMsg.value ?: return@collect
+              if (surfaceId !in cur.surfaces) {
+                _streamingMsg.value = cur.copy(surfaces = cur.surfaces + surfaceId)
+              }
+            }
             "reasoning" -> {
               val cur = _streamingMsg.value ?: return@collect
               _streamingMsg.value = cur.copy(reasoning = cur.reasoning + (chunk.text ?: ""))
@@ -478,7 +545,7 @@ class ChatViewModel(
             }
             "done" -> {
               val done = _streamingMsg.value
-              if (done != null && (done.content.isNotEmpty() || done.ui.isNotEmpty() || done.reasoning.isNotEmpty())) {
+              if (done != null && done.hasContent()) {
                 _messages.value = _messages.value + done
               }
               _streamingMsg.value = null
@@ -490,7 +557,7 @@ class ChatViewModel(
       // Fallback: if the stream closed without a 'done' event, promote whatever
       // was accumulated so the response is not silently dropped.
       val leftover = _streamingMsg.value
-      if (leftover != null && (leftover.content.isNotEmpty() || leftover.ui.isNotEmpty() || leftover.reasoning.isNotEmpty())) {
+      if (leftover != null && leftover.hasContent()) {
         _messages.value = _messages.value + leftover
       }
       _streamingMsg.value = null
@@ -504,7 +571,7 @@ class ChatViewModel(
     job?.cancel()
     job = null
     val partial = _streamingMsg.value
-    if (partial != null && (partial.content.isNotEmpty() || partial.ui.isNotEmpty() || partial.reasoning.isNotEmpty())) {
+    if (partial != null && partial.hasContent()) {
       _messages.value = _messages.value + partial
     }
     _streamingMsg.value = null
@@ -537,6 +604,10 @@ class ChatViewModel(
 
   fun newChat(id: String? = null) {
     stop()
+    // §45b: the old conversation's surfaces go with it. A surface holds live
+    // data-model state, and leaving it mounted under a new conversation would
+    // let a stale checklist write into a thread it has nothing to do with.
+    a2ui.reset()
     conversationId = id
     _conversationId.value = id
     lastUserText = null
@@ -826,6 +897,16 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     }
   }
   var input by remember { mutableStateOf("") }
+  // §45b: a tap on a generated card becomes a suggestion in the composer.
+  // Prefilled, never sent — the model offered it, the user decides. A card that
+  // spent the user's money or sent their prompt on a single tap would be a
+  // control that commits without consent.
+  LaunchedEffect(Unit) {
+    vm.surfaceActions.collect { action ->
+      // A surface that has since been torn down has no say in this thread.
+      if (action.surfaceId in vm.a2ui.surfaceOrder.value) input = action.label
+    }
+  }
   val listState = rememberLazyListState()
   val scope = rememberCoroutineScope()
   val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -838,6 +919,14 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
   }
   var creatingChat by remember { mutableStateOf(false) }
   var drawerDelete by remember { mutableStateOf<ConversationDto?>(null) }
+
+  // Back must close the drawer, not the app. Material3's ModalNavigationDrawer
+  // does not register its own BackHandler on every version, so the sheet is
+  // only dismissed by tapping the scrim. Claim the gesture here while open,
+  // and keep the delete-confirm dialog on top of it while one is showing.
+  BackHandler(enabled = drawerState.isOpen && drawerDelete == null) {
+    scope.launch { drawerState.close() }
+  }
 
   // Both new-chat controls share this guard so rapid taps cannot create a
   // pile of empty conversations while the first request is still in flight.
@@ -1018,7 +1107,11 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(NovaRadius.md))
-                .background(if (selected) scheme.primaryContainer.copy(alpha = 0.72f) else Color.Transparent)
+                // The active conversation has to be findable at a glance. At 0.72
+                // alpha of the container tint over the drawer fill the two were
+                // almost the same value, so the current chat looked like every
+                // other one. Full container tint reads clearly without shouting.
+                .background(if (selected) scheme.primaryContainer else Color.Transparent)
                 .clickable {
                   scope.launch {
                     runCatching {
@@ -1031,18 +1124,36 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                 .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
               verticalAlignment = Alignment.CenterVertically,
             ) {
-              Box(Modifier.size(8.dp).background(if (selected) scheme.primary else scheme.outlineVariant, CircleShape))
-              Spacer(Modifier.width(12.dp))
+              // No leading dot. It was 8dp of decoration on every row that never
+              // lit for any row but one, so it read as a status nobody could
+              // change. "You are here" is carried by the row wash plus the
+              // title's weight — state you can read in the type, not a mark
+              // bolted on beside it.
               Column(Modifier.weight(1f)) {
-                Text(c.title.ifBlank { "New chat" }, maxLines = 1, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface)
+                Text(
+                  c.title.ifBlank { "New chat" },
+                  maxLines = 1,
+                  style = MaterialTheme.typography.bodyMedium,
+                  fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                  color = if (selected) scheme.onSurface else scheme.onSurface.copy(alpha = 0.86f),
+                )
                 novaRelativeTime(c.updatedAt)?.let { when_ ->
-                  Text(when_, fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = novaFaint())
+                  Text(
+                    when_,
+                    fontFamily = NovaMono,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (selected) scheme.primary else novaFaint(),
+                  )
                 }
               }
               NovaIconAction(
                 icon = Icons.Default.Delete,
                 contentDescription = "Delete ${c.title.ifBlank { "chat" }}",
-                tint = scheme.error,
+                // Quiet by default. A saturated red mark on every row made the
+                // most destructive action the loudest thing in the list and
+                // outranked the chat titles; the confirm dialog is where the
+                // warning belongs. Still a full 48dp target and labelled.
+                tint = novaFaint(),
                 onClick = { drawerDelete = c },
               )
             }
@@ -1055,8 +1166,14 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             }
           }
         }
-        HorizontalDivider(color = scheme.outlineVariant)
-        // Floating bottom bar: accent Chat pill + avatar + waveform.
+        // Inset to the content margin rather than running edge to edge: a rule
+        // that spans the full panel width reads as a divider between two
+        // screens, not as a seam inside one list.
+        HorizontalDivider(
+          modifier = Modifier.padding(horizontal = 16.dp),
+          color = scheme.outlineVariant.copy(alpha = 0.5f),
+        )
+        // Floating bottom bar: tonal Chat pill + avatar + waveform.
         Row(
           Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
           verticalAlignment = Alignment.CenterVertically,
@@ -1069,13 +1186,18 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             enabled = !creatingChat,
             modifier = Modifier.weight(1f).heightIn(min = 52.dp),
             shape = CircleShape,
+            // Tonal, not a full-strength accent slab. At scheme.primary this
+            // was the single brightest object in the app and sat shoulder to
+            // shoulder with the accent voice button, so two saturated shapes
+            // competed and the CTA stopped reading as a button. The container
+            // tint keeps it clearly primary while letting the drawer stay dark.
             colors = ButtonDefaults.buttonColors(
-              containerColor = scheme.primary,
-              contentColor = scheme.onPrimary,
+              containerColor = scheme.primaryContainer,
+              contentColor = scheme.onPrimaryContainer,
             ),
           ) {
             if (creatingChat) {
-              CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = scheme.onPrimary)
+              CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = scheme.onPrimaryContainer)
             } else {
               Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
             }
@@ -1102,7 +1224,13 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               else micPermission.launch(Manifest.permission.RECORD_AUDIO)
             },
             shape = CircleShape,
-            color = scheme.primary,
+            // A peer of the avatar, not a second filled action. Once the Chat CTA
+            // went tonal this circle was the only saturated shape left in the
+            // drawer and it out-shouted the row's actual primary action. Voice is
+            // secondary here; in the composer it is the primary, and that one
+            // keeps the accent fill.
+            color = novaGlassFill(),
+            border = androidx.compose.foundation.BorderStroke(1.dp, novaGlassEdge()),
             modifier = Modifier.size(MinTouchTarget).semantics { role = Role.Button; contentDescription = "Voice input" },
           ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
@@ -1111,7 +1239,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
               ) {
                 listOf(8.dp, 13.dp, 9.dp).forEach { h ->
-                  Box(Modifier.width(2.5.dp).height(h).clip(RoundedCornerShape(NovaRadius.hair)).background(scheme.onPrimary))
+                  Box(Modifier.width(2.5.dp).height(h).clip(RoundedCornerShape(NovaRadius.hair)).background(scheme.primary))
                 }
               }
             }
@@ -1193,6 +1321,11 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     var overlayPx by remember { mutableStateOf(0) }
     val overlayDp = with(density) { overlayPx.toDp() }
     val bottomChrome = LocalBottomChrome.current
+    // The composer floats ON the bar, so it offsets by the bar's own footprint.
+    // LocalBottomChrome additionally covers the dissolve gradient, which is only
+    // there for scroll content — offsetting the composer by that too would lift
+    // it clear of the pill and leave a gap.
+    val bottomBar = LocalBottomBarHeight.current
 
     Box(Modifier.weight(1f)) {
     LazyColumn(
@@ -1202,7 +1335,20 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
     ) {
       if (messages.isEmpty()) {
         item {
-          Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp)) {
+          // The empty state used to sit at the top of a full-height list, which
+          // left roughly a third of the screen as a black void between the
+          // starter cards and the composer — the first screen read as a stack
+          // with a hole in it rather than a composed frame. Filling the
+          // viewport and centring puts the block on the screen's own axis.
+          // contentPadding already reserves the composer and the bar, so the
+          // centring happens in the space that is actually free.
+          Column(
+            Modifier
+              .fillParentMaxHeight()
+              .fillMaxWidth()
+              .padding(horizontal = 24.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.Center,
+          ) {
             Text(
               "What needs\ndoing today?",
               fontFamily = NovaDisplay,
@@ -1385,6 +1531,10 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
                   if (url.startsWith("https://")) context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                 }
               }
+              if (m.surfaces.isNotEmpty()) {
+                Spacer(Modifier.height(NovaSpace.sm))
+                A2uiSurfaceRow(m.surfaces, controller = vm.a2ui)
+              }
               AssistantActionRow(
                 onCopy = { clipboard.setText(AnnotatedString(m.content)) },
                 onSpeak = { speakOut(m.content) },
@@ -1428,25 +1578,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
 
             Spacer(Modifier.height(6.dp))
             if (sm.content.isEmpty() && currentStep == null) {
-              // Spec S09: 12dp violet dot pulsing at the left margin.
-              val pulse = rememberInfiniteTransition(label = "streamDot")
-              val dotAlpha by pulse.animateFloat(
-                initialValue = 0.35f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                  animation = tween(600, easing = NovaMotion.Pulse),
-                  repeatMode = RepeatMode.Reverse,
-                ),
-                label = "streamDotAlpha",
-              )
-              Box(
-                Modifier
-                  .size(12.dp)
-                  .graphicsLayer { alpha = dotAlpha }
-                  .clip(CircleShape)
-                  .background(scheme.primary)
-                  .semantics { contentDescription = "Nova is writing" },
-              )
+              // The waiting state used to be a single 12dp pulsing dot with no
+              // label. On its own it read as a dropped frame rather than as
+              // "working", and a 3-6s wait looked frozen. NovaThinkingIndicator
+              // is the same three-dot pulse plus a phrase that rotates, so the
+              // pause says what it is doing instead of just existing.
+              NovaThinkingIndicator()
             } else if (sm.content.isNotEmpty()) {
               MarkdownBody(sm.content, true)
             }
@@ -1455,6 +1592,10 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
               GenerativeUiRenderer(sm.ui, clipboard) { url ->
                 if (url.startsWith("https://")) context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
               }
+            }
+            if (sm.surfaces.isNotEmpty()) {
+              Spacer(Modifier.height(NovaSpace.sm))
+              A2uiSurfaceRow(sm.surfaces, controller = vm.a2ui)
             }
           }
         }
@@ -1477,9 +1618,11 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
       }
     }
 
-    // Floating jump control, parked above the composer column (composer
-    // height + bottom chrome + gap) so it never hides behind the chrome.
-    Box(Modifier.align(Alignment.BottomCenter).padding(bottom = bottomChrome + overlayDp + NovaSpace.md)) {
+    // Floating jump control, parked just above the composer column. overlayDp
+    // is measured on the composer AFTER its own bottom padding, so bottomChrome
+    // is already baked in — adding it again lifted this into the middle of the
+    // paragraph, sitting on top of the text it was meant to clear.
+    Box(Modifier.align(Alignment.BottomCenter).padding(bottom = overlayDp + NovaSpace.md)) {
       NovaJumpToLatest(
         visible = !atBottom && messages.isNotEmpty(),
         onClick = {
@@ -1496,7 +1639,7 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
       Modifier
         .align(Alignment.BottomCenter)
         .fillMaxWidth()
-        .padding(bottom = bottomChrome)
+        .padding(bottom = bottomBar)
         .imePadding()
         .onGloballyPositioned { coords -> overlayPx = coords.size.height },
     ) {
@@ -1701,8 +1844,12 @@ fun ChatScreen(api: NovaApi, session: SessionToken, onSettingsClick: () -> Unit 
             }
           }
         }
+        // Model / Effort sit on the SAME left axis as the attach button above.
+        // The top row reaches the axis through the panel pad + row pad + field
+        // pad (8 + 8 + 4 = 20dp), so this row pads to 12dp and the trigger's
+        // own 8dp content padding lands on 20dp too.
         Row(
-          Modifier.fillMaxWidth().padding(start = NovaSpace.sm, end = NovaSpace.sm, bottom = NovaSpace.xs),
+          Modifier.fillMaxWidth().padding(start = NovaSpace.md, end = NovaSpace.sm, bottom = NovaSpace.xs),
           verticalAlignment = Alignment.CenterVertically,
         ) {
           GenerationTrigger(
@@ -1901,6 +2048,21 @@ private fun GenerationPickerSheet(
     onDismissRequest = onDismiss,
     containerColor = novaGlassFill(),
     contentColor = scheme.onSurface,
+    // A real scrim. Without it the thread behind stayed at full brightness right
+    // up to the sheet's top edge, so the last line of a reply was sliced in half
+    // by a hard horizontal line and read as a clipping bug.
+    scrimColor = Color.Black.copy(alpha = 0.55f),
+    dragHandle = {
+      Box(Modifier.fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
+        Box(
+          Modifier
+            .width(32.dp)
+            .height(4.dp)
+            .clip(CircleShape)
+            .background(scheme.onSurfaceVariant.copy(alpha = 0.4f))
+        )
+      }
+    },
     sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
   ) {
     Column(
@@ -2065,7 +2227,7 @@ private fun effortDescription(effort: String): String = when (effort) {
   ) {
     item {
       NovaPageHeader(
-        eyebrow = if (liveCount == 0) "Your workspace" else "$liveCount live",
+        eyebrow = if (liveCount == 0) "Your workspace" else "$liveCount running now",
         title = "Agents",
         subtitle = "Tell Nova what should happen. Review the tools and timing before anything runs.",
         onBack = onBack,
@@ -2734,11 +2896,17 @@ private fun JsonElement?.toPreview(): String {
   }
 }
 
+@Composable
 private fun String?.toRunTime(): String {
   if (this.isNullOrBlank()) return "No runs yet"
+  // "MMM d" + the device time pattern, so a run stamp agrees with the message
+  // stamps instead of switching to 12-hour behind the user's back on one screen
+  // only.
+  val clock = novaTimePattern()
   return runCatching {
     val instant = java.time.Instant.parse(this)
-    java.time.format.DateTimeFormatter.ofPattern("MMM d, h:mm a", java.util.Locale.getDefault())
+    java.time.format.DateTimeFormatter
+      .ofPattern("MMM d, $clock", java.util.Locale.getDefault())
       .withZone(java.time.ZoneId.systemDefault())
       .format(instant)
   }.getOrDefault(this)
@@ -2805,8 +2973,11 @@ private fun String?.toRunTime(): String {
     }
     if (!loading && shown.isEmpty() && error == null) {
       item {
+        // Coupled to the filter row above with one comfortable gap, rather than
+        // floating in the middle of the screen. Empty space below an empty list
+        // is normal and fills as runs arrive; what made the old version read as
+        // unfinished was a stray glyph and no relationship to the filters.
         NovaEmptyState(
-          glyph = "◷",
           title = if (filter == "All") "Quiet so far." else "Nothing $filter.",
           body = if (filter == "All") {
             "Run an agent and its trace will land here."
@@ -2986,7 +3157,6 @@ private fun String?.toRunTime(): String {
     if (!loading && chats.isEmpty() && error == null) {
       item {
         NovaEmptyState(
-          glyph = if (query.isBlank()) null else "“$query”",
           title = if (query.isBlank() && !showArchived) "No chats yet." else "Nothing matches.",
           body = when {
             query.isNotBlank() -> "No conversation title contains that word. Try a shorter one."
@@ -3130,6 +3300,59 @@ private fun oauthErrorText(code: String): String = when (code) {
   else -> "Connection failed: ${code.replace('_', ' ')}. Please try again."
 }
 
+/**
+ * Constant-width slot for a provider row's action. One width for every state
+ * ("Connect" / "Reconnect" / "Disconnect" / "Ready") so the control column
+ * never changes width between rows and the list stays on a single grid.
+ */
+private val ActionSlotWidth = 104.dp
+
+/**
+ * Tonal provider action. A stack of saturated accent labels is the loudest
+ * thing on the screen and outranks the provider names it belongs to; this is
+ * the quiet version — a real filled surface in the tone's own container colour
+ * with a hairline edge, so the accent reads as a considered tint rather than a
+ * spray of highlight. No glow, no shadow, no lift on press.
+ *
+ * Danger gets an outline instead of a fill. A red slab repeated on every
+ * connected row turned a routine, reversible action into the loudest element in
+ * the list; the danger signal belongs on the confirm dialog, not on all of them.
+ */
+@Composable
+private fun ProviderAction(
+  label: String?,
+  tone: NovaTone,
+  busy: Boolean = false,
+  onClick: () -> Unit,
+) {
+  val scheme = MaterialTheme.colorScheme
+  val accent = novaToneColor(tone)
+  val outline = tone == NovaTone.Danger
+  val container = when {
+    outline -> Color.Transparent
+    tone == NovaTone.Danger -> scheme.errorContainer
+    else -> scheme.primaryContainer
+  }
+  val edge = if (outline) accent.copy(alpha = 0.42f) else Color.Transparent
+  val enabled = label != null && !busy
+  Surface(
+    onClick = onClick,
+    enabled = enabled,
+    shape = RoundedCornerShape(NovaRadius.row),
+    color = container,
+    contentColor = accent,
+    border = if (outline) androidx.compose.foundation.BorderStroke(1.dp, edge) else null,
+    modifier = Modifier.heightIn(min = 38.dp),
+  ) {
+    Box(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
+      when {
+        busy -> CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp, color = accent)
+        label != null -> Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+      }
+    }
+  }
+}
+
 @Composable fun ConnectionsScreen(api: NovaApi, session: SessionToken, onBack: () -> Unit = {}) {
   val scope = rememberCoroutineScope()
   val context = LocalContext.current
@@ -3190,7 +3413,7 @@ private fun oauthErrorText(code: String): String = when (code) {
   ) {
     item {
       NovaPageHeader(
-        eyebrow = "$live of ${providers.size} live",
+        eyebrow = "$live of ${providers.size} connected",
         title = "Tied together.",
         subtitle = "Agents borrow these accounts. Nothing runs without your say.",
         onBack = onBack,
@@ -3209,116 +3432,149 @@ private fun oauthErrorText(code: String): String = when (code) {
       val needsReconnect = p.state == "needs_reconnect"
       val isConnecting = connecting == p.id
       GlassPanel(corner = RoundedCornerShape(NovaRadius.xl)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-          Text(
-            glyphOf[p.id] ?: "?",
-            fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineMedium,
-            color = when {
-              connected -> scheme.primary
-              needsReconnect -> scheme.tertiary
-              else -> scheme.onSurfaceVariant
-            },
-            modifier = Modifier.width(34.dp),
-          )
-          Column(modifier = Modifier.weight(1f)) {
-            Text(p.name, fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
-            Spacer(Modifier.height(2.dp))
-            Text(p.blurb, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-            Spacer(Modifier.height(2.dp))
+        // Two-line row. The name and the action share the top line on one grid;
+        // the blurb and the status run underneath at FULL card width.
+        //
+        // The previous shape put a three-line blurb and a button in the same
+        // row, so the copy column was squeezed to ~40% of the card and wrapped
+        // mid-token ("Docs read/ create"), while the fixed action slot was still
+        // too narrow for the word "Disconnect" and clipped it to "Disconne".
+        // Giving the copy the whole measure fixes both at once: no mid-token
+        // breaks, and the slot only has to hold a single line of label.
+        Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 14.dp, top = 15.dp, bottom = 15.dp)) {
+          Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-              when {
-                connected && p.login != null -> "Connected as ${p.login}"
-                connected -> "Connected"
-                needsReconnect -> "Session expired. Reconnect"
-                p.state == "not_configured" -> "Not set up on the server yet"
-                p.state == "not_built" -> "Coming in a later phase"
-                else -> "Not connected"
-              },
-              fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall,
+              glyphOf[p.id] ?: "?",
+              fontFamily = NovaDisplay,
+              style = MaterialTheme.typography.headlineSmall,
               color = when {
-                connected -> scheme.secondary
+                connected -> scheme.primary
                 needsReconnect -> scheme.tertiary
-                else -> scheme.onSurfaceVariant
+                else -> novaFaint()
               },
+              modifier = Modifier.width(34.dp),
             )
-          }
-          Spacer(Modifier.width(8.dp))
-          if (connected) {
-            // §38: disconnect removes the connection row server-side
-            TextButton(onClick = {
-              scope.launch {
-                when (p.id) {
-                  "github" -> runCatching { api.disconnectGitHub() }.onSuccess { refresh() }
-                  "gmail" -> runCatching { api.disconnectGmail() }.onSuccess { refresh() }
-                  "calendar" -> runCatching { api.disconnectCalendar() }.onSuccess { refresh() }
-                  "drive" -> runCatching { api.disconnectDrive() }.onSuccess { refresh() }
-                  "vercel" -> runCatching { api.disconnectVercel() }.onSuccess { refresh() }
-                  "supabase" -> runCatching { api.disconnectSupabase() }.onSuccess { refresh() }
-                }
-              }
-            }) {
-              Text("Disconnect", color = scheme.error, style = MaterialTheme.typography.labelMedium)
-            }
-          } else if (needsReconnect || (p.state == "available" && p.id in setOf("github", "gmail", "calendar", "drive", "vercel", "supabase"))) {
-            // §38: OAuth — redirect user to the provider to authorize.
-            // Backend callback redirects to nova://connections/{provider}/status;
-            // the manifest intent-filter + MainActivity deliver that deep link
-            // back here, and ON_RESUME refreshes state on return.
-            // Vercel/Supabase are token-based: open a paste-a-key dialog instead.
-            TextButton(
-              enabled = !isConnecting,
-              onClick = {
-                when (p.id) {
-                  "vercel" -> vercelDialog = true
-                  "supabase" -> supabaseDialog = true
-                  else -> scope.launch {
-                    connecting = p.id
-                    when (p.id) {
-                      "github" -> runCatching { api.githubAuthorize() }
-                        .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
-                        .onFailure { error = "Could not start GitHub connection. Check backend config." }
-                      "calendar" -> runCatching { api.calendarAuthorize() }
-                        .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
-                        .onFailure { error = "Could not start Calendar connection. Check backend config." }
-                      "drive" -> runCatching { api.driveAuthorize() }
-                        .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
-                        .onFailure { error = "Could not start Drive connection. Check backend config." }
-                      else -> runCatching { api.gmailAuthorize() }
-                        .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
-                        .onFailure { error = "Could not start Gmail connection. Check backend config." }
+            Spacer(Modifier.width(8.dp))
+            Text(
+              p.name,
+              modifier = Modifier.weight(1f),
+              fontFamily = NovaDisplay,
+              style = MaterialTheme.typography.titleSmall,
+              color = scheme.onSurface,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.width(10.dp))
+            // Fixed slot: every action right-aligns to the same edge, whatever
+            // its label, so the control column never shifts between rows.
+            Box(Modifier.width(ActionSlotWidth), contentAlignment = Alignment.CenterEnd) {
+              if (connected) {
+                // §38: disconnect removes the connection row server-side
+                ProviderAction(
+                  label = "Disconnect",
+                  tone = NovaTone.Danger,
+                  onClick = {
+                    scope.launch {
+                      when (p.id) {
+                        "github" -> runCatching { api.disconnectGitHub() }.onSuccess { refresh() }
+                        "gmail" -> runCatching { api.disconnectGmail() }.onSuccess { refresh() }
+                        "calendar" -> runCatching { api.disconnectCalendar() }.onSuccess { refresh() }
+                        "drive" -> runCatching { api.disconnectDrive() }.onSuccess { refresh() }
+                        "vercel" -> runCatching { api.disconnectVercel() }.onSuccess { refresh() }
+                        "supabase" -> runCatching { api.disconnectSupabase() }.onSuccess { refresh() }
+                      }
                     }
-                    connecting = null
-                  }
-                }
-              },
-            ) {
-              if (isConnecting) {
-                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = scheme.primary)
+                  },
+                )
+              } else if (needsReconnect || (p.state == "available" && p.id in setOf("github", "gmail", "calendar", "drive", "vercel", "supabase"))) {
+                // §38: OAuth — redirect user to the provider to authorize.
+                // Backend callback redirects to nova://connections/{provider}/status;
+                // the manifest intent-filter + MainActivity deliver that deep link
+                // back here, and ON_RESUME refreshes state on return.
+                // Vercel/Supabase are token-based: open a paste-a-key dialog instead.
+                ProviderAction(
+                  label = if (isConnecting) null else if (needsReconnect) "Reconnect" else "Connect",
+                  busy = isConnecting,
+                  tone = NovaTone.Accent,
+                  onClick = {
+                    when (p.id) {
+                      "vercel" -> vercelDialog = true
+                      "supabase" -> supabaseDialog = true
+                      else -> scope.launch {
+                        connecting = p.id
+                        when (p.id) {
+                          "github" -> runCatching { api.githubAuthorize() }
+                            .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
+                            .onFailure { error = "Could not start GitHub connection. Check backend config." }
+                          "calendar" -> runCatching { api.calendarAuthorize() }
+                            .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
+                            .onFailure { error = "Could not start Calendar connection. Check backend config." }
+                          "drive" -> runCatching { api.driveAuthorize() }
+                            .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
+                            .onFailure { error = "Could not start Drive connection. Check backend config." }
+                          else -> runCatching { api.gmailAuthorize() }
+                            .onSuccess { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.url))) }
+                            .onFailure { error = "Could not start Gmail connection. Check backend config." }
+                        }
+                        connecting = null
+                      }
+                    }
+                  },
+                )
               } else {
-                Text(if (needsReconnect) "Reconnect" else "Connect", color = scheme.primary, fontWeight = FontWeight.Bold)
+                // Backend said this provider is not offered — say so, honestly (§19).
+                Text("Soon", color = novaFaint(), style = MaterialTheme.typography.labelMedium)
               }
             }
-          } else {
-            // Backend said this provider is not offered — say so, honestly (§19).
-            TextButton(enabled = false, onClick = {}) {
-              Text("Soon", color = novaFaint(), style = MaterialTheme.typography.labelMedium)
-            }
           }
+          Spacer(Modifier.height(4.dp))
+          Text(
+            p.blurb,
+            modifier = Modifier.padding(start = 42.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = scheme.onSurfaceVariant,
+          )
+          Spacer(Modifier.height(5.dp))
+          Text(
+            when {
+              connected && p.login != null -> "Connected as ${p.login}"
+              connected -> "Connected"
+              needsReconnect -> "Session expired. Reconnect"
+              p.state == "not_configured" -> "Not set up on the server yet"
+              p.state == "not_built" -> "Coming in a later phase"
+              else -> "Not connected"
+            },
+            modifier = Modifier.padding(start = 42.dp),
+            fontFamily = NovaMono,
+            style = MaterialTheme.typography.labelSmall,
+            color = when {
+              connected -> scheme.secondary
+              needsReconnect -> scheme.tertiary
+              else -> novaFaint()
+            },
+          )
         }
       }
     }
     item {
       // §18 LeetCode — server-keyed, no connection needed. Always ready in chat.
+      // Same two-line shape and the same action slot as the provider rows above,
+      // so it wraps on the same measure and does not read as a different layout.
       GlassPanel(corner = RoundedCornerShape(NovaRadius.xl)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-          Text("LC", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineMedium, color = scheme.primary, modifier = Modifier.width(34.dp))
-          Column(modifier = Modifier.weight(1f)) {
-            Text("LeetCode", fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
-            Spacer(Modifier.height(2.dp))
-            Text("Profiles, solved counts, contests, daily problem. Use @leetcode in chat.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-            Spacer(Modifier.height(2.dp))
-            Text("Built in, no connection needed", fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.secondary)
+        Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 14.dp, top = 15.dp, bottom = 15.dp)) {
+          Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("LC", fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineSmall, color = novaFaint(), modifier = Modifier.width(34.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("LeetCode", modifier = Modifier.weight(1f), fontFamily = NovaDisplay, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.width(10.dp))
+            Box(Modifier.width(ActionSlotWidth), contentAlignment = Alignment.CenterEnd) {
+              Text("Ready", color = novaFaint(), style = MaterialTheme.typography.labelMedium)
+            }
           }
+          Spacer(Modifier.height(4.dp))
+          Text("Profiles, solved counts, contests, daily problem. Use @leetcode in chat.", modifier = Modifier.padding(start = 42.dp), style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+          Spacer(Modifier.height(5.dp))
+          Text("Built in, no connection needed", modifier = Modifier.padding(start = 42.dp), fontFamily = NovaMono, style = MaterialTheme.typography.labelSmall, color = scheme.secondary)
         }
       }
     }
@@ -3563,7 +3819,7 @@ fun SettingsScreen(session: SessionToken, onLogout: () -> Unit, onBack: (() -> U
       }
     }
 
-    item { SettingsSectionLabel("Account", Modifier.padding(top = NovaSpace.sm)) }
+    item { SettingsSectionLabel("Your account", Modifier.padding(top = NovaSpace.sm)) }
     item {
       SettingsGroup {
         SettingsGroupRow(
@@ -3592,7 +3848,7 @@ fun SettingsScreen(session: SessionToken, onLogout: () -> Unit, onBack: (() -> U
       }
     }
 
-    item { SettingsSectionLabel("Accounts", Modifier.padding(top = NovaSpace.sm)) }
+    item { SettingsSectionLabel("Connected accounts", Modifier.padding(top = NovaSpace.sm)) }
     item {
       SettingsGroup {
         SettingsGroupRow(
@@ -3636,6 +3892,20 @@ fun SettingsScreen(session: SessionToken, onLogout: () -> Unit, onBack: (() -> U
                     })
                   }
                 },
+                // Explicit colours. The stock M3 switch resolved to a dark
+                // track with a dark knob on this scheme, so the OFF state read
+                // as a smudge rather than as a control and neither state was
+                // legible against the card. Tonal track plus a clearly-valued
+                // thumb makes OFF and ON both readable, and keeps the accent
+                // consistent with the rest of the app.
+                colors = SwitchDefaults.colors(
+                  checkedThumbColor = scheme.onPrimaryContainer,
+                  checkedTrackColor = scheme.primaryContainer,
+                  checkedBorderColor = scheme.primary.copy(alpha = 0.55f),
+                  uncheckedThumbColor = scheme.onSurfaceVariant,
+                  uncheckedTrackColor = scheme.surfaceContainerHighest,
+                  uncheckedBorderColor = scheme.outline,
+                ),
               )
             } else {
               Text("System", fontSize = 14.sp, color = scheme.onSurfaceVariant)
@@ -3726,7 +3996,7 @@ fun SettingsScreen(session: SessionToken, onLogout: () -> Unit, onBack: (() -> U
                 text = {
                   Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(16.dp).clip(CircleShape).background(novaAccentSwatch(accent)))
-                    Spacer(Modifier.width(10.dp))
+                    Spacer(Modifier.width(8.dp))
                     Text(
                       accent.label,
                       color = if (accent == currentAccent) scheme.primary else scheme.onSurface,
@@ -3768,9 +4038,12 @@ fun SettingsScreen(session: SessionToken, onLogout: () -> Unit, onBack: (() -> U
         SettingsGroupRow(
           label = "Log out",
           onClick = { showSignOutConfirm = true },
-          labelColor = scheme.error,
+          // Tonal danger, not the full-strength error colour. A poster-red row
+          // at the bottom of a dark screen outranked the actual content above
+          // it; the confirm dialog is where the warning is allowed to be loud.
+          labelColor = scheme.error.copy(alpha = 0.82f),
           leading = {
-            Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = scheme.error, modifier = Modifier.size(22.dp))
+            Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = scheme.error.copy(alpha = 0.82f), modifier = Modifier.size(22.dp))
           },
         )
       }

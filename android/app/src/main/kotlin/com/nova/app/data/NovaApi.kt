@@ -43,6 +43,11 @@ data class StreamChunk(
   val message: String? = null,
   @SerialName("approvalId") val approvalId: String? = null,
   val blocks: List<UiBlockDto> = emptyList(),
+  // §45b: one A2UI protocol frame, kept as the raw JSON string. The engine
+  // parses protocol versions we do not know about, so re-modelling the envelope
+  // here would mean a client release per protocol revision. The string crosses
+  // the wire untouched and NovaA2uiController is the only thing that reads it.
+  val frame: String? = null,
 )
 
 @Serializable

@@ -90,6 +90,131 @@ blank metric values rejected, copy action attached server-side, content
 visible by default (user collapse only), `filter` no longer mis-wired to
 expand, link URLs must be http(s).
 
+## A2UI surfaces (§45b, `a2ui/` + `backend/src/ui/A2ui.ts`)
+
+The A2UI path (`androidx.a2ui.compose:compose-runtime|compose-ui` and
+`androidx.compose.material3:material3-a2ui`, all `1.0.0-alpha01`, protocol
+`v0.9.1`) sits beside §45, not instead of it. §45 is a fixed vocabulary of ten
+card shapes — right for a table of numbers. A2UI is an open one: the model
+composes whatever the catalog offers and the app renders it as real Compose,
+with live data bindings, progressive streaming and actions travelling back.
+
+### How a surface reaches the screen
+
+```
+model → present_surface tool  (typed card content, no JSON)
+       ↓
+A2ui.ts  →  createSurface      (empty surface, catalogId)
+           updateComponents    (tree, bindings pointing at nothing yet)
+           updateDataModel     (the values those bindings point at)
+       ↓
+StreamChunk { type: "a2ui", frame }  ×3, over the existing SSE stream
+       ↓
+NovaA2uiController.submit()  →  A2uiSurface  →  Nova components
+```
+
+Three frames, in that order, on purpose. The card frames land before the data
+does, so a surface fills in the way a streaming answer does rather than popping
+in whole. `Message.surfaces` holds only the surface *ids*; the models are engine
+state, so a card that fills in later updates the mounted transcript instead of
+re-entering it.
+
+### The catalog
+
+One catalog, one id (`https://nova.app/catalogs/agentic/v1/catalog.json` — an
+identifier, never fetched), holding two layers:
+
+- The A2UI **Basic Catalog** (`Text`, `Card`, `Column`, `Button`, `Image`,
+  `CheckBox`…), so a model that has never heard of Nova still renders something.
+- Nova's own components, all `Nova*`-prefixed so they can never collide with a
+  spec name.
+
+Both in one catalog because a component can only reference children in the same
+catalog — a Nova card that wants a `Text` child needs the Basic `Text` beside it.
+
+| Component | Shape | Notable |
+|---|---|---|
+| `NovaTrip` | destination over dates over the flight | flight is mono + tabular; `legStatus` as a status pill |
+| `NovaStay` | name, address, check-in/out, photo | Coil for the image; mono times |
+| `NovaWeather` | now, high/low, rain, wind, hour strip | strip is drawn at equal weight so 3 hours and 12 read the same |
+| `NovaAgenda` | a day's timed entries | time is mono + accent, title is the row's largest type, place is the quietest |
+| `NovaChecklist` | tickable list | **two-way**: writes through `bindUpdater` to the surface data model |
+| `NovaApproval` | provider, amount, instrument, 4-state flow | `pending → verifying → approved → declined`, each with its own sentence |
+| `NovaActions` | suggested next steps as pills | each dispatches an action instead of navigating |
+
+### Readiness and progressive rendering
+
+`isReady` is what lets a component wait for its own data. Each answers on its
+single required binding — the trip waits for its destination, the checklist for
+its first item — and treats everything else as genuinely optional. That is what
+makes a card fill in field by field rather than appearing all at once.
+
+A field that has not arrived renders as a skeleton bar, not an empty string.
+
+### Two-way binding, honestly
+
+`NovaChecklist` is the only surface that writes back. When the agent sends
+`done[]` it gets a bound path and the ticks persist; when it does not,
+`bindUpdater` returns null and the rows render **read-only** — the label is
+dropped from the semantics and the tap does nothing. A control that cannot
+persist must not look like one that can.
+
+Tapping anything else (a chip, a confirm button) produces a `SurfaceAction` that
+**prefills the composer**. It does not send. The model offered the next step;
+the user still decides.
+
+### Supplying the parts the libraries do not
+
+The A2UI libraries ship no image loader and no media stack, on purpose — a
+bundled one would collide with whatever the app already uses. So the catalog
+takes them as slots:
+
+- **Image** — the Coil instance Nova already had.
+- **Video / Audio** — honest placeholders showing the media reference. Nova has
+  no Media3 dependency, and a play control that does nothing is worse than none.
+  These two objects are the only things that change if Media3 lands.
+- **URL opener** — `NovaA2uiContext`, http/https only. A generated surface is
+  model output, so a `file://` or `intent://` URL would be the model asking the
+  app to open something the user never chose.
+- **Message formatter** — `{name}` substitution, and a whole number prints as
+  `3`, never `3.0`.
+
+### Boundaries
+
+- The model never emits A2UI JSON. It calls `present_surface` with typed
+  content, and `A2ui.ts` builds the frames — so the server owns every id, every
+  JSON Pointer, and the `root` of the tree. A hallucinated component name or
+  data path is rejected there, not rendered as a hole.
+- The action interceptor drops any action from a surface that is no longer live,
+  so a torn-down checklist cannot talk to the agent.
+- `newChat` resets the controller, so surfaces go with the conversation they
+  belong to.
+- A turn whose only content is a surface still gets kept (`Message.hasContent`).
+- A generative-UI failure is an inline note in the card, not a lost answer: the
+  prose around it is still true.
+
+### Build note
+
+`compileSdk = 37` + **`compileSdkMinor = 1`**. The A2UI artifacts are built
+against API 37.1 and their AAR metadata rejects a lower minor version.
+`targetSdk` stays 36 — a compileSdk minor opts into no new runtime behaviour.
+
+### Tests
+
+- `backend/src/ui/A2ui.test.ts` — 19 tests on frame construction: ordering,
+  the `root` requirement, unique ids, every binding being a pointer with a value
+  behind it, no binding for an absent field, checklist read-only vs two-way,
+  label round-trip, https-only photos, unknown kinds rejected, the payload cap.
+- `android/.../test/.../NovaA2uiWireTest.kt` — 15 JVM tests: SSE frame
+  deserialization, surface-id extraction from all four envelope keys, the
+  `deleteSurface` escaping (quote, backslash, control characters), and the
+  action name/label mapping.
+- `android/.../androidTest/.../NovaA2uiCatalogTest.kt` — needs a device. Drives
+  the real catalog through the real engine: a trip card draws its destination,
+  a checklist tick reaches the data model, an unbound checklist does not write,
+  an action chip dispatches its named event, the approval card shows its amount
+  and state.
+
 ## Solid surface system (was: glassmorphism / Haze)
 
 - **Decision** — Haze was removed. On the emulator (and anywhere the blur

@@ -8,7 +8,12 @@ plugins {
 
 android {
   namespace = "com.nova.app"
-  compileSdk = 37 // markdown-renderer 0.45.0 AAR requires 37; target stays 36 (Play deadline §1.4)
+  // 37 + minor 1: the A2UI artifacts (androidx.a2ui.compose:*, material3-a2ui)
+  // are built against API 37.1 and their AAR metadata rejects a lower minor.
+  // targetSdk stays 36 (Play deadline §1.4) — a compileSdk minor opts into no
+  // new runtime behaviour.
+  compileSdk = 37
+  compileSdkMinor = 1
   defaultConfig {
     applicationId = "com.nova.app"
     minSdk = 26
@@ -85,8 +90,19 @@ dependencies {
   implementation(libs.markdown.renderer.code)
   implementation(libs.markdown.renderer.coil3)
 
+  // Agent-to-UI (A2UI): agent-generated surfaces rendered as native Compose.
+  implementation(libs.a2ui.compose.runtime)
+  implementation(libs.a2ui.compose.ui)
+  implementation(libs.a2ui.material3)
+
   testImplementation("junit:junit:4.13.2")
 
   androidTestImplementation("androidx.test:runner:1.7.0")
   androidTestImplementation("androidx.test.ext:junit:1.3.0")
+  androidTestImplementation(platform(libs.compose.bom))
+  androidTestImplementation(libs.compose.ui.test.junit4)
+  // Supplies the test activity the Compose test harness needs. Debug-only, and
+  // merged into the test APK rather than the app.
+  debugImplementation(libs.compose.ui.test.manifest)
+  androidTestImplementation(libs.a2ui.compose.ui.testing)
 }
