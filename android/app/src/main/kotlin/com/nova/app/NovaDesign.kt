@@ -47,6 +47,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -209,6 +210,23 @@ object NovaGlass {
  */
 val LocalBottomChrome = staticCompositionLocalOf { 0.dp }
 
+/**
+ * The bar's own footprint: bar + margin + system nav inset, WITHOUT the
+ * dissolve above it. Floating chrome that sits on top of the bar (the chat
+ * composer) offsets by this; scroll content offsets by [LocalBottomChrome],
+ * which also covers the gradient.
+ */
+val LocalBottomBarHeight = staticCompositionLocalOf { 0.dp }
+
+/**
+ * The screen's own substrate — the colour content dissolves into at the bottom
+ * edge. Matches the ambient field's lower stop so the fade lands on the real
+ * background instead of a grey band that reads as a seam of its own.
+ */
+@Composable
+fun novaSubstrate(): Color =
+  if (novaDark()) NovaAmbient.BottomDark else NovaAmbient.BottomLight
+
 /** Continuous ambient field under every screen — tonal gradient, never a radial glow. */
 @Composable
 fun novaAmbientBrush(): Brush =
@@ -310,6 +328,12 @@ private fun buildNovaScheme(accent: NovaAccent, dark: Boolean): ColorScheme {
       onPrimaryContainer = Color.White,
       secondary = Color(0xFFB3B3B3),
       onSecondary = Color.Black,
+      // M3's default secondaryContainer is a mauve that belongs to no accent, so
+      // a selected FilterChip rendered violet under a pink or blue accent and the
+      // screen read as two themes at once. `secondary` is deliberately neutral
+      // here, so its container is neutral too.
+      secondaryContainer = Color(0xFF2E2E2E),
+      onSecondaryContainer = Color(0xFFE6E6E6),
       tertiary = Color(0xFF8F9EC6),
       surface = Color(0xFF000000),
       onSurface = Color.White,
@@ -331,6 +355,8 @@ private fun buildNovaScheme(accent: NovaAccent, dark: Boolean): ColorScheme {
       onPrimaryContainer = NovaPalette.InkLight,
       secondary = Color(0xFF3E6B3A),
       onSecondary = Color.White,
+      secondaryContainer = Color(0xFFDDEBD8),
+      onSecondaryContainer = Color(0xFF1B3318),
       tertiary = Color(0xFF7A6142),
       surface = NovaPalette.LightBg,
       onSurface = NovaPalette.InkLight,
@@ -465,21 +491,29 @@ fun GlassPanel(
   }
 }
 
-/** Mono eyebrow above a title. The one place letterspacing is used. */
+/**
+ * Eyebrow above a title.
+ *
+ * One quiet treatment for every screen. It used to be uppercase mono at 1.2sp
+ * tracking in the accent colour, which put a tracked-caps costume in the accent
+ * hue above the heading on Agents, Activity and Connections all at once — three
+ * screens wearing the same signalling costume, and shouting in the one colour
+ * reserved for real state. Sentence case in the quiet text tone carries the
+ * label without the costume; a live count still reads as a count because it is
+ * a number, not because it is painted in the accent.
+ */
 @Composable
-fun NovaEyebrow(text: String, color: Color = MaterialTheme.colorScheme.primary, modifier: Modifier = Modifier) {
+fun NovaEyebrow(text: String, color: Color = MaterialTheme.colorScheme.onSurfaceVariant, modifier: Modifier = Modifier) {
   Text(
-    text.uppercase(),
+    text,
     modifier = modifier,
-    fontFamily = NovaMono,
-    style = MaterialTheme.typography.labelSmall,
-    fontWeight = FontWeight.SemiBold,
-    letterSpacing = 1.2.sp,
+    style = MaterialTheme.typography.labelLarge,
+    fontWeight = FontWeight.Medium,
     color = color,
   )
 }
 
-/** Small-caps section divider inside a scroll column. */
+/** Section divider inside a scroll column. Same voice as [NovaEyebrow]. */
 @Composable
 fun NovaSectionLabel(text: String, modifier: Modifier = Modifier) {
   NovaEyebrow(text, color = novaFaint(), modifier = modifier)
@@ -645,18 +679,31 @@ fun NovaCard(
 fun NovaEmptyState(
   title: String,
   body: String,
-  glyph: String? = null,
   actionLabel: String? = null,
   onAction: (() -> Unit)? = null,
 ) {
-  Column(Modifier.fillMaxWidth().padding(vertical = NovaSpace.lg)) {
-    if (glyph != null) {
-      Text(glyph, fontFamily = NovaDisplay, style = MaterialTheme.typography.headlineMedium, color = novaFaint())
-      Spacer(Modifier.height(NovaSpace.sm))
-    }
-    Text(title, fontFamily = NovaDisplay, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+  // No decorative glyph. It was a lone text character in a faint tone floating
+  // above the title with nothing anchoring it, so it read as a stray mark rather
+  // than as a considered element; on the search screen it echoed the query back
+  // as a big faint character, which said nothing the title did not already say.
+  // The title and body carry the whole message on their own.
+  Column(Modifier.fillMaxWidth().padding(top = NovaSpace.xl, bottom = NovaSpace.lg)) {
+    Text(
+      title,
+      fontFamily = NovaDisplay,
+      style = MaterialTheme.typography.titleLarge,
+      color = MaterialTheme.colorScheme.onSurface,
+    )
     Spacer(Modifier.height(NovaSpace.xs))
-    Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Text(
+      body,
+      style = MaterialTheme.typography.bodyMedium,
+      // Held to the card's own value rather than the faintest step: this text
+      // is the only thing the screen has to say, and dimming it to a whisper
+      // left the empty state looking like a disabled control.
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      modifier = Modifier.fillMaxWidth(0.92f),
+    )
     if (actionLabel != null && onAction != null) {
       Spacer(Modifier.height(NovaSpace.md))
       NovaButton(actionLabel, onAction)
@@ -739,16 +786,40 @@ fun NovaFilterChips(
   onSelect: (String) -> Unit,
   modifier: Modifier = Modifier,
 ) {
+  val scheme = MaterialTheme.colorScheme
   Row(
     modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
     horizontalArrangement = Arrangement.spacedBy(NovaSpace.sm),
   ) {
     options.forEach { option ->
+      val isSelected = option == selected
       FilterChip(
-        selected = option == selected,
+        selected = isSelected,
         onClick = { onSelect(option) },
-        label = { Text(option, style = MaterialTheme.typography.labelMedium) },
+        label = {
+          Text(
+            option,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (isSelected) scheme.onPrimaryContainer else scheme.onSurfaceVariant,
+          )
+        },
+        // The active filter is the one place on these screens that should carry
+        // the accent, so it reads as a choice rather than as another chip. The
+        // stock FilterChip took its selected colours from secondaryContainer and
+        // came out the same value whatever the accent was set to.
         shape = RoundedCornerShape(NovaRadius.sm),
+        colors = FilterChipDefaults.filterChipColors(
+          containerColor = Color.Transparent,
+          labelColor = scheme.onSurfaceVariant,
+          selectedContainerColor = scheme.primaryContainer,
+          selectedLabelColor = scheme.onPrimaryContainer,
+        ),
+        border = FilterChipDefaults.filterChipBorder(
+          enabled = true,
+          selected = isSelected,
+          borderColor = scheme.outline,
+          selectedBorderColor = Color.Transparent,
+        ),
         modifier = Modifier.heightIn(min = MinTouchTarget),
       )
     }
@@ -1014,14 +1085,31 @@ fun novaRelativeTime(iso: String?): String? {
 }
 
 /**
+ * Time pattern that follows the device's 12/24-hour setting.
+ *
+ * A hardcoded "HH:mm" put a 24-hour stamp next to a 12-hour system clock and
+ * read as a bug, so the pattern is resolved from the platform instead of
+ * assumed. `java.text.DateFormat.getTimeFormat` is deliberately avoided: its
+ * `toPattern()` collides with the Kotlin stdlib `String.toPattern` and picks up
+ * a regex-flags default, so the 12/24 decision is made explicitly here.
+ */
+@Composable
+fun novaTimePattern(): String =
+  if (android.text.format.DateFormat.is24HourFormat(LocalContext.current)) "HH:mm" else "h:mm a"
+
+/**
  * Clock time for a message. Uses the server timestamp when present; a message
  * still streaming has none yet, so the caller passes the send time it captured.
  */
+@Composable
 fun novaClockTime(iso: String?): String? {
   if (iso.isNullOrBlank()) return null
   val then = runCatching { java.time.Instant.parse(iso) }.getOrNull() ?: return null
-  return then.atZone(java.time.ZoneId.systemDefault())
-    .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
+  val local = then.atZone(java.time.ZoneId.systemDefault())
+  val pattern = novaTimePattern()
+  return runCatching {
+    java.time.format.DateTimeFormatter.ofPattern(pattern, java.util.Locale.getDefault()).format(local)
+  }.getOrElse { local.toLocalTime().toString().take(5) }
 }
 
 /**

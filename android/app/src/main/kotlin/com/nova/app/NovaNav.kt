@@ -24,6 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -77,6 +78,12 @@ private val TabSlotGap = 0.dp
 private val TabBarHPad = 4.dp
 /** Visual height of the sliding selection wash — inset so the pill rim reads. */
 private val TabIndicatorHeight = 34.dp
+/**
+ * Height of the dissolve above the floating bar. Long enough, with the eased
+ * stops below, that a line of text loses contrast over several lines instead of
+ * vanishing at one edge.
+ */
+private val BottomFadeHeight = 44.dp
 
 @Composable
 fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
@@ -136,9 +143,14 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
   val imeVisible = WindowInsets.ime.getBottom(density) > 0
   val showBar = shouldShowBottomBar(imeVisible, drawerOpen)
 
-  // Clearance for scroll content under the floating bar (bar + margin + nav inset).
+  // Two different clearances, because the bar and the dissolve are different
+  // things. Scroll content must clear the bar AND the gradient that dissolves
+  // into it, or the last row comes to rest half-faded and reads as a rendering
+  // fault. Floating chrome (the composer) only has to clear the bar itself —
+  // lifting it by the fade height too would leave a dead gap above the pill.
   val navBars = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-  val bottomChrome = if (showBar) TabBarHeight + TabBarMargin + navBars else 0.dp
+  val bottomBar = if (showBar) TabBarHeight + TabBarMargin + navBars else 0.dp
+  val bottomChrome = if (showBar) bottomBar + BottomFadeHeight else 0.dp
 
   fun goToTab(target: String) {
     if (target == selectedTab) {
@@ -165,7 +177,10 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
     }
   }
 
-  CompositionLocalProvider(LocalBottomChrome provides bottomChrome) {
+  CompositionLocalProvider(
+    LocalBottomChrome provides bottomChrome,
+    LocalBottomBarHeight provides bottomBar,
+  ) {
     Box(Modifier.fillMaxSize()) {
       // Screens content. The pill bar sits above it.
       Box(
@@ -218,6 +233,41 @@ fun NovaNav(session: SessionToken, onPreferencesChanged: () -> Unit = {}) {
               onConnectionsClick = { nav.navigate("connections") { launchSingleTop = true } },
             )
           }
+        }
+      }
+
+      // Content that scrolls under the floating bar used to end on a hard
+      // horizontal line exactly at the pill's top edge, so a half-cut card read
+      // as broken rather than as depth. A short gradient in the screen's own
+      // substrate dissolves the last lines of text into the chrome instead,
+      // and it tracks the bar in and out with it. The bar itself stays a solid
+      // spec fill, so nothing reads through the icons.
+      AnimatedVisibility(
+        visible = showBar,
+        enter = fadeIn(tween(NovaMotion.Standard, easing = NovaMotion.Ease)),
+        exit = fadeOut(tween(NovaMotion.Quick, easing = NovaMotion.Ease)),
+        modifier = Modifier
+          .align(Alignment.BottomCenter)
+          .fillMaxWidth()
+          .height(TabBarHeight + TabBarMargin + navBars + BottomFadeHeight)
+          .padding(bottom = navBars),
+      ) {
+        Box(Modifier.fillMaxSize()) {
+          Box(
+            Modifier
+              .align(Alignment.BottomCenter)
+              .fillMaxWidth()
+              .height(BottomFadeHeight)
+              .background(
+                Brush.verticalGradient(
+                  // Transparent at the top of the fade, full substrate at the
+                  // bar. Text loses contrast gradually instead of being cut.
+                  0f to novaSubstrate(),
+                  0.55f to novaSubstrate().copy(alpha = 0.82f),
+                  1f to novaSubstrate(),
+                )
+              )
+          )
         }
       }
 

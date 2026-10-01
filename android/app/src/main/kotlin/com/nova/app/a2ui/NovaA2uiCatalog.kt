@@ -211,7 +211,9 @@ private object NovaMessageFormatter : A2uiMessageFormatter {
     }
   }
 
-  private val PLACEHOLDER = Regex("""\{([^{}]+)}""")
+  // Both braces must be escaped: ICU rejects a bare `}` that closes nothing,
+  // so the unescaped form crashes the app at startup on Android.
+  private val PLACEHOLDER = Regex("""\{([^{}]+)\}""")
 }
 
 private val NovaLocaleProvider = A2uiLocaleProvider { Locale.getDefault() }
